@@ -7,17 +7,24 @@ import (
 )
 
 func MakeEvaluators(rules []Rule) {
-	for _, rule := range rules {
-		_, err := expr.Compile(rule.Match, expr.Env(EvalCtx{}))
+	envExpr := expr.Env(EvalCtx{})
+	for i := range rules {
+		rule := &rules[i]
+		prog, err := expr.Compile(rule.Match, envExpr)
 		if err != nil {
 			log.Fatal(err)
 		}
+		rule.Evaluator = prog
 	}
 }
 
 type EvalCtx struct {
 	Name string
 
-	Width  uint
-	Height uint
+	Width       int
+	Height      int
+	Format      string
+	DurationSec float64
+
+	Tags []string
 }
