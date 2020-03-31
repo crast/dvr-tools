@@ -48,6 +48,7 @@ type GeneralTrack struct {
 }
 
 type MediaTrackMixin struct {
+	SegmentType   string            `json:"@type"`
 	ID            string            `json:"ID"`
 	UniqueID      string            `json:"UniqueID"`
 	Format        string            `json:"Format"`

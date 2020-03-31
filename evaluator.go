@@ -4,9 +4,11 @@ import (
 	"log"
 
 	"github.com/antonmedv/expr"
+	"github.com/antonmedv/expr/vm"
 )
 
-func MakeEvaluators(rules []Rule) {
+func MakeEvaluators(rules []Rule) []*vm.Program {
+	programs := make([]*vm.Program, len(rules))
 	envExpr := expr.Env(EvalCtx{})
 	for i := range rules {
 		rule := &rules[i]
@@ -14,8 +16,9 @@ func MakeEvaluators(rules []Rule) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		rule.Evaluator = prog
+		programs[i] = prog
 	}
+	return programs
 }
 
 type EvalCtx struct {

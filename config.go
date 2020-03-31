@@ -2,7 +2,6 @@ package videoproc
 
 import (
 	"github.com/BurntSushi/toml"
-	"github.com/antonmedv/expr/vm"
 )
 
 func ParseConfig(filename string) (*Config, error) {
@@ -12,7 +11,8 @@ func ParseConfig(filename string) (*Config, error) {
 }
 
 type Config struct {
-	Rule []Rule
+	General GeneralConfig
+	Rule    []Rule
 }
 
 type Rule struct {
@@ -21,5 +21,8 @@ type Rule struct {
 	Comskip    string
 	ComskipINI string `toml:"comskip-ini"`
 	Actions    []string
-	Evaluator  *vm.Program `toml:"-"`
+}
+
+type GeneralConfig struct {
+	ScratchDir string `toml:"scratch-dir"`
 }
