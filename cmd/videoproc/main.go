@@ -22,10 +22,12 @@ import (
 var configFile string
 var debugMode bool
 var scratchDir string
+var deleteOriginal bool
 
 func main() {
 	flag.BoolVar(&debugMode, "debug", false, "Debug Mode")
 	flag.StringVar(&configFile, "config", "tmp/test.toml", "TOML config file")
+	flag.BoolVar(&deleteOriginal, "delete-orig", false, "Delete original file")
 	flag.Parse()
 	if flag.NArg() != 1 {
 		fmt.Println("usage: Blah De Blah <media file>")
@@ -102,29 +104,26 @@ func main() {
 
 	if decision.Comskip == "chapter" || decision.Comskip == "comchap" || isTrue(decision.Comskip) {
 		commercials := runComskip(fileName, decision)
+		//commercials := edlToCommercials("/loc/scratch/vp57433.edl")
 		if len(commercials) != 0 {
-			var buf bytes.Buffer
-			buf.WriteString(";FFMETADATA1\n")
-			begin := float64(0.0)
-			for i, commercial := range commercials {
-				if i != 0 || commercial.Begin > 0.5 {
-					writeChapter(&buf, begin, commercial.Begin, fmt.Sprintf("Segment %v", i+1))
+			chapters := makeChapters(commercials, c.DurationSec)
+
+			if strings.HasSuffix(fileName, ".mkv") {
+				logrus.Warn("Swapping properties using mkvpropedit")
+				if err := editMKVChapters(fileName, chapters); err != nil {
+					logrus.Fatal(err)
 				}
-				writeChapter(&buf, commercial.Begin, commercial.End, fmt.Sprintf("Commercial %v", i+1))
+				return
+			} else {
+				buf := chaptersToFF(chapters)
+				logrus.Info(string(buf))
 
-				begin = commercial.End
+				metaFile := filepath.Join(scratchDir, filepath.Base(fileName)+".ffmeta")
+				if err := ioutil.WriteFile(metaFile, buf, 0666); err != nil {
+					logrus.Fatal(err)
+				}
+				ffmpegOpts = append(ffmpegOpts, "-i", metaFile, "-map_metadata", "1")
 			}
-
-			if lastComm := commercials[len(commercials)-1]; lastComm.End < (c.DurationSec - 0.3) {
-				writeChapter(&buf, lastComm.End, c.DurationSec, fmt.Sprintf("Segment %d", len(commercials)+1))
-			}
-			logrus.Info(buf.String())
-
-			metaFile := filepath.Join(scratchDir, filepath.Base(fileName)+".ffmeta")
-			if err := ioutil.WriteFile(metaFile, buf.Bytes(), 0666); err != nil {
-				logrus.Fatal(err)
-			}
-			ffmpegOpts = append(ffmpegOpts, "-i", metaFile, "-map_metadata", "1")
 		}
 	}
 
@@ -141,18 +140,94 @@ func main() {
 		"-nostdin", "-i", fileName,
 	}, ffmpegOpts...)
 
-	tmpOutFile := filepath.Join(scratchDir, filepath.Base(fileName)+".mkv")
+	destFile := stripExtension(fileName) + ".mkv"
+
+	tmpOutFile := filepath.Join(scratchDir, filepath.Base(destFile))
 	baseCmd = append(baseCmd, "-c:v", "copy", "-c:a", "copy", "-c:s", "copy", tmpOutFile)
 	logrus.Debugf("About to ffmpeg %#v", baseCmd)
 
 	cmd := exec.Command("ffmpeg", baseCmd...)
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
-	cmd.Run()
+	if err := cmd.Run(); err != nil {
+		logrus.Fatal(err)
+	}
+
+	if err := os.Rename(tmpOutFile, destFile); err != nil {
+		if err := runCommand("mv", "--", tmpOutFile, destFile); err != nil {
+			logrus.Fatal(err)
+		}
+	}
+	if deleteOriginal && fileName != destFile {
+		if err := os.Remove(fileName); err != nil {
+			logrus.Fatal(err)
+		}
+	}
 }
 
-func writeChapter(buf *bytes.Buffer, begin, end float64, title string) {
-	fmt.Fprintf(buf, "[CHAPTER]\nTIMEBASE=1/1000\nSTART=%d\nEND=%d\ntitle=%s\n", int(begin*1000.0), int(end*1000.0), title)
+func editMKVChapters(fileName string, chapters []Chapter) error {
+	var buf bytes.Buffer
+	for i, chapter := range chapters {
+		cnum := fmt.Sprintf("%02d", i+1)
+		fmt.Fprintf(&buf, "CHAPTER%s=%s\nCHAPTER%sNAME=%s\n", cnum, timestampMKV(chapter.Begin), cnum, chapter.Name)
+	}
+	logrus.Debug("chapterfile", buf.String())
+	chapterFile := filepath.Join(scratchDir, strings.Replace(filepath.Base(fileName), ".mkv", ".chapter", -1))
+	if err := ioutil.WriteFile(chapterFile, buf.Bytes(), 0666); err != nil {
+		return err
+	}
+
+	cmd := exec.Command("mkvpropedit", fileName, "--chapters", chapterFile)
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	return cmd.Run()
+}
+
+func timestampMKV(floatSeconds float64) string {
+	rawSeconds := int(floatSeconds)
+	seconds := rawSeconds % 60
+	rawMinutes := rawSeconds / 60
+	hours := rawMinutes / 60
+
+	return fmt.Sprintf("%02d:%02d:%02d.%03d", hours, rawMinutes%60, seconds, int((floatSeconds-float64(rawSeconds))*1000.0))
+}
+
+func makeChapters(commercials []Commercial, fileDuration float64) []Chapter {
+	var chapters []Chapter
+
+	begin := float64(0.0)
+	for i, commercial := range commercials {
+		if i != 0 || commercial.Begin > 0.5 {
+			chapters = append(chapters, Chapter{
+				Begin: begin, End: commercial.Begin,
+				Name: fmt.Sprintf("Segment %v", i+1),
+			})
+		}
+
+		chapters = append(chapters, Chapter{
+			Begin: commercial.Begin, End: commercial.End,
+			Name:         fmt.Sprintf("Commercial %v", i+1),
+			IsCommercial: true,
+		})
+
+		begin = commercial.End
+	}
+	if lastComm := commercials[len(commercials)-1]; lastComm.End < (fileDuration - 0.3) {
+		chapters = append(chapters, Chapter{
+			Begin: lastComm.End, End: fileDuration,
+			Name: fmt.Sprintf("Segment %v", len(commercials)+1),
+		})
+	}
+	return chapters
+}
+
+func chaptersToFF(chapters []Chapter) []byte {
+	var buf bytes.Buffer
+	buf.WriteString(";FFMETADATA1\n")
+	for _, chapter := range chapters {
+		fmt.Fprintf(&buf, "[CHAPTER]\nTIMEBASE=1/1000\nSTART=%d\nEND=%d\ntitle=%s\n", int(chapter.Begin*1000.0), int(chapter.End*1000.0), chapter.Name)
+	}
+	return buf.Bytes()
 }
 
 func runComskip(fileName string, decision *videoproc.Rule) []Commercial {
@@ -160,7 +235,6 @@ func runComskip(fileName string, decision *videoproc.Rule) []Commercial {
 	csPrefix := "vp" + strconv.Itoa(os.Getpid())
 	cmd := exec.Command(
 		"comskip",
-		"--demux",
 		"--ini="+decision.ComskipINI,
 		"--output="+scratchDir,
 		"--output-filename="+csPrefix,
@@ -173,8 +247,11 @@ func runComskip(fileName string, decision *videoproc.Rule) []Commercial {
 	if err := cmd.Run(); err != nil {
 		logrus.Fatal(err)
 	}
+	return edlToCommercials(filepath.Join(scratchDir, csPrefix+".edl"))
+}
 
-	f, _ := os.Open(filepath.Join(scratchDir, csPrefix+".edl"))
+func edlToCommercials(edlFile string) []Commercial {
+	f, _ := os.Open(edlFile)
 	defer f.Close()
 	reader := csv.NewReader(f)
 	reader.Comma = '\t'
@@ -188,11 +265,19 @@ func runComskip(fileName string, decision *videoproc.Rule) []Commercial {
 		commercials = append(commercials, Commercial{begin, end})
 	}
 	return commercials
+
 }
 
 type Commercial struct {
 	Begin float64
 	End   float64
+}
+
+type Chapter struct {
+	Begin        float64
+	End          float64
+	Name         string
+	IsCommercial bool
 }
 
 func takeString(existing *string, updated string) {
@@ -209,4 +294,16 @@ func isFalse(v string) bool {
 func isTrue(v string) bool {
 	v = strings.ToLower(v)
 	return v == "true" || v == "yes"
+}
+
+func stripExtension(fileName string) string {
+	i := strings.LastIndex(fileName, ".")
+	return fileName[:i]
+}
+
+func runCommand(prog string, args ...string) error {
+	cmd := exec.Command(prog, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
