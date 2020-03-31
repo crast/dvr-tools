@@ -48,11 +48,18 @@ func main() {
 			debugPrint("video %#v", v)
 			c.Height = v.Height.Int()
 			c.Width = v.Width.Int()
+			c.Video.Format = v.Format
+			c.Video.Extra = v.Extra
+			c.Video.FormatVersion = v.FormatVersion
+			c.Video.FormatProfile = v.FormatProfile
 
 		case *mediainfo.GeneralTrack:
 			debugPrint("general %#v", v)
-			c.Format
+			c.Format = v.Format
 			c.DurationSec = v.Duration.Float()
+		case *mediainfo.AudioTrack:
+			c.Audio.Format = v.Format
+			c.Audio.Extra = v.Extra
 		}
 	}
 
@@ -69,6 +76,10 @@ func main() {
 			continue
 		}
 		log.Printf("MATCHED RULE %v", rule.Label)
+		takeString(&decision.Comskip, rule.Comskip)
+		takeString(&decision.ComskipINI, rule.ComskipINI)
+
+		decision.Actions = append(decision.Actions, rule.Actions...)
 
 	}
 
@@ -80,9 +91,8 @@ func debugPrint(v string, args ...interface{}) {
 	}
 }
 
-func takeString(existing, updated string) string {
+func takeString(existing *string, updated string) {
 	if updated != "" {
-		return updated
+		*existing = updated
 	}
-	return existing
 }

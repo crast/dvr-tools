@@ -23,8 +23,23 @@ type EvalCtx struct {
 
 	Width       int
 	Height      int
-	Format      string
 	DurationSec float64
+	Format      string
+
+	Audio AudioCtx
+	Video VideoCtx
 
 	Tags []string
+}
+
+type VideoCtx struct {
+	Format        string
+	FormatVersion string
+	FormatProfile string
+	Extra         map[string]string
+}
+
+type AudioCtx struct {
+	Format string
+	Extra  map[string]string
 }
