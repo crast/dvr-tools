@@ -143,7 +143,7 @@ func main() {
 	destFile := stripExtension(fileName) + ".mkv"
 
 	tmpOutFile := filepath.Join(scratchDir, filepath.Base(destFile))
-	baseCmd = append(baseCmd, "-c:v", "copy", "-c:a", "copy", "-c:s", "copy", tmpOutFile)
+	baseCmd = append(baseCmd, "-c", "copy", tmpOutFile)
 	logrus.Debugf("About to ffmpeg %#v", baseCmd)
 
 	cmd := exec.Command("ffmpeg", baseCmd...)
@@ -177,10 +177,7 @@ func editMKVChapters(fileName string, chapters []Chapter) error {
 		return err
 	}
 
-	cmd := exec.Command("mkvpropedit", fileName, "--chapters", chapterFile)
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stdout
-	return cmd.Run()
+	return runCommand("mkvpropedit", fileName, "--chapters", chapterFile)
 }
 
 func timestampMKV(floatSeconds float64) string {
