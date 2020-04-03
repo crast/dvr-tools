@@ -13,9 +13,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/antonmedv/expr"
 	"github.com/crast/videoproc"
 	"github.com/crast/videoproc/mediainfo"
+
+	"github.com/antonmedv/expr"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -44,14 +46,25 @@ func main() {
 	if err != nil {
 		logrus.Fatal(err)
 	}
-	scratchDir = conf.General.ScratchDir
-
-	evaluators := videoproc.MakeEvaluators(conf.Rule)
 
 	fileName := flag.Args()[0]
+
+	job := &Job{}
+	if err:=	processVideo(context.Background(), conf, fileName); err != nil {
+		job.DeleteErroredFiles()
+		log.Fatal(err)
+	} else {
+		job.DeleteFiles()
+	}
+}
+
+func processVideo(ctx context.Context, job *Job, config *videoproc.Config, fileName string) error{
+	scratchDir = conf.General.ScratchDir
+	evaluators := videoproc.MakeEvaluators(conf.Rule)
+
 	info, err := mediainfo.Parse(context.Background(), fileName)
 	if err != nil {
-		logrus.Fatal(err)
+		return errors.Wrap(err, "could not parse mediainfo")
 	}
 
 	c := videoproc.EvalCtx{
@@ -103,7 +116,7 @@ func main() {
 	var ffmpegOpts []string
 
 	if decision.Comskip == "chapter" || decision.Comskip == "comchap" || isTrue(decision.Comskip) {
-		commercials := runComskip(fileName, decision)
+		commercials := job.RunComskip(fileName, decision)
 		//commercials := edlToCommercials("/loc/scratch/vp57433.edl")
 		if len(commercials) != 0 {
 			chapters := makeChapters(commercials, c.DurationSec)
@@ -111,7 +124,7 @@ func main() {
 			if strings.HasSuffix(fileName, ".mkv") {
 				logrus.Warn("Swapping properties using mkvpropedit")
 				if err := editMKVChapters(fileName, chapters); err != nil {
-					logrus.Fatal(err)
+					return errors.Wrap(err, "Could not edit MKV chapters")
 				}
 				return
 			} else {
@@ -154,15 +167,29 @@ func main() {
 	}
 
 	if err := os.Rename(tmpOutFile, destFile); err != nil {
-		if err := runCommand("mv", "--", tmpOutFile, destFile); err != nil {
-			logrus.Fatal(err)
+		logrus.Infof("got error with naive rename %s; going to use 'mv' instead", err.Error())
+		if err := runCommand(ctx, "mv", "--", tmpOutFile, destFile); err != nil {
+			return errors.Wrap(err, "could not run mv")
 		}
 	}
 	if deleteOriginal && fileName != destFile {
 		if err := os.Remove(fileName); err != nil {
-			logrus.Fatal(err)
+			return errors.Wrap(err, "could not remove orig")
 		}
 	}
+}
+
+type TrackedFile struct {
+	Filename string
+	MissingOK bool
+}
+
+type Job struct {
+	filesTracked []TrackedFile
+}
+
+func (job *Job) TrackFile(fileName string, missingOK bool) {
+	job.filesTracked = append(job.filesTracked, TrackedFile{fileName, missingOK})
 }
 
 func editMKVChapters(fileName string, chapters []Chapter) error {
@@ -227,10 +254,11 @@ func chaptersToFF(chapters []Chapter) []byte {
 	return buf.Bytes()
 }
 
-func runComskip(fileName string, decision *videoproc.Rule) []Commercial {
+func (job *Job) runComskip(ctx context.Context, fileName string, decision *videoproc.Rule) ([]Commercial, error) {
 	logrus.Infof("About to run comskip")
 	csPrefix := "vp" + strconv.Itoa(os.Getpid())
-	cmd := exec.Command(
+	cmd := exec.CommandContext(
+		ctx,
 		"comskip",
 		"--ini="+decision.ComskipINI,
 		"--output="+scratchDir,
@@ -241,18 +269,30 @@ func runComskip(fileName string, decision *videoproc.Rule) []Commercial {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	logrus.Debug(cmd.Args)
+	absoluteBase := filepath.Join(scratchDir, csPrefix)
+	job.TrackFile(absoluteBase+".ccyes", true)
+	job.TrackFile(absoluteBase+".edl", true)
+	job.TrackFile(absoluteBase+".txt", true)
+	job.TrackFile(absoluteBase+".log", true)
 	if err := cmd.Run(); err != nil {
-		logrus.Fatal(err)
+		return nil, errors.Wrap(err, "could not run comskip")
 	}
-	return edlToCommercials(filepath.Join(scratchDir, csPrefix+".edl"))
+
+	return edlToCommercials(absoluteBase+".edl"))
 }
 
-func edlToCommercials(edlFile string) []Commercial {
-	f, _ := os.Open(edlFile)
+func edlToCommercials(edlFile string) ([]Commercial,error) {
+	f, err := os.Open(edlFile)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not open EDL")
+	}
 	defer f.Close()
 	reader := csv.NewReader(f)
 	reader.Comma = '\t'
-	edits, _ := reader.ReadAll()
+	edits, err := reader.ReadAll()
+	if err != nil{
+		return nil, errors.Wrap(err, "could not parse CSV")
+	}
 
 	logrus.Warnf("edits: %#v", edits)
 	var commercials []Commercial
@@ -298,8 +338,8 @@ func stripExtension(fileName string) string {
 	return fileName[:i]
 }
 
-func runCommand(prog string, args ...string) error {
-	cmd := exec.Command(prog, args...)
+func runCommand(ctx context.Context, prog string, args ...string) error {
+	cmd := exec.CommandContext(ctx, prog, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
