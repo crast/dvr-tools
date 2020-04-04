@@ -71,13 +71,15 @@ func handleHook(w http.ResponseWriter, req *http.Request) {
 }
 
 func globalPoller(ctx context.Context) {
-	ticker := time.NewTicker(2500 * time.Millisecond)
+	const smallTimeout = 2000 * time.Millisecond
+	const addTimeout = 50 * time.Millisecond
+	currentTimeout := smallTimeout
 	for {
 		var when time.Time
 		select {
 		case <-ctx.Done():
 			return
-		case when = <-ticker.C:
+		case when = <-time.After(currentTimeout):
 		}
 
 		buf, err := httpGet(ctx, "/status/sessions")
@@ -104,6 +106,11 @@ func globalPoller(ctx context.Context) {
 				},
 				Source: "poller",
 			}
+		}
+		if len(mc.Video) == 0 {
+			currentTimeout += addTimeout
+		} else {
+			currentTimeout = smallTimeout
 		}
 
 	}
@@ -156,15 +163,15 @@ func (s *State) Poller(ctx context.Context) {
 			continue
 		}
 		positions = append(positions, update.position)
-		i := len(positions) - 1
-		if (positions[i].Position - positions[i-1].Position) > 11000 {
-			logrus.Info("Seek detected %d", i)
-			first := i - 15
+		idx := len(positions) - 1
+		if (positions[idx].Position - positions[idx-1].Position) > 11000 {
+			logrus.Info("Seek detected %d", idx)
+			first := idx - 50
 			if first < 0 {
 				first = 0
 			}
-			for i, pos := range positions[first:] {
-				logrus.Infof(" -> %02d: %d", i, pos.Position)
+			for i := first; i < len(positions); i++ {
+				logrus.Infof(" -> %02d: %d", i, positions[i].Position)
 			}
 		}
 	}
@@ -185,7 +192,11 @@ func fire(event *Event) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if event.Event == "media.pause" || event.Event == "media.resume"{
+	switch event.Event {
+
+	case "media.pause", "media.resume", "media.stop", "media.play":
+		logrus.Debugf("event %s %#v", event.Event, event)
+
 		state := ensureState(event.Metadata.Key)
 		state.Chan <- PlayUpdate{
 			position: position{
@@ -194,9 +205,8 @@ func fire(event *Event) {
 			},
 			Source: event.Event,
 		}
-	}
-	else {
-		logrus.Warnf("Unknown event %s %v", event.Event, event)
+	default:
+		logrus.Warnf("Unknown event %s %#v", event.Event, event)
 	}
 }
 
