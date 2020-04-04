@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/csv"
@@ -9,17 +10,24 @@ import (
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/crast/videoproc"
 	"github.com/crast/videoproc/mediainfo"
 
 	"github.com/antonmedv/expr"
+	"github.com/nightlyone/lockfile"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
+
+const FLAG_VER = "2"
 
 var configFile string
 var debugMode bool
@@ -27,19 +35,31 @@ var scratchDir string
 var deleteOriginal bool
 
 func main() {
-	flag.BoolVar(&debugMode, "debug", false, "Debug Mode")
-	flag.StringVar(&configFile, "config", "tmp/test.toml", "TOML config file")
-	flag.BoolVar(&deleteOriginal, "delete-orig", false, "Delete original file")
-	flag.Parse()
-	if flag.NArg() != 1 {
-		fmt.Println("usage: Blah De Blah <media file>")
-		flag.Usage()
-		os.Exit(1)
+	defaultConfigFile := "tmp/test.toml"
+	if len(os.Args) >= 1 {
+		tomlFile := os.Args[0] + ".toml"
+		if info, err := os.Stat(tomlFile); err == nil && info.Size() > 0 {
+			defaultConfigFile = tomlFile
+		}
 	}
+	var lockFile string
+	flag.BoolVar(&debugMode, "debug", false, "Debug Mode")
+	flag.StringVar(&configFile, "config", defaultConfigFile, "TOML config file")
+	flag.BoolVar(&deleteOriginal, "delete-orig", false, "Delete original file")
+	flag.StringVar(&lockFile, "lock-file", "", "Lock on this file")
+	flag.Parse()
 	if debugMode {
 		logrus.SetLevel(logrus.DebugLevel)
 	} else {
 		logrus.SetLevel(logrus.InfoLevel)
+	}
+
+	logrus.Debugf("videoproc FLAG %s", FLAG_VER)
+
+	if flag.NArg() != 1 {
+		fmt.Println("usage: Blah De Blah <media file>")
+		flag.Usage()
+		os.Exit(1)
 	}
 
 	conf, err := videoproc.ParseConfig(configFile)
@@ -47,20 +67,49 @@ func main() {
 		logrus.Fatal(err)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		ch := make(chan os.Signal, 2)
+		signal.Notify(ch, os.Interrupt, syscall.SIGQUIT)
+		for _ = range ch {
+			cancel()
+		}
+	}()
+
+	if lockFile != "" {
+		l, err := lockfile.New(lockFile)
+		if err != nil {
+			logrus.Fatal(err)
+			return
+		}
+		for {
+			if err := l.TryLock(); err == nil {
+				defer l.Unlock()
+				break
+			}
+			logrus.Debug("Lockfile was held, sleeping 1 sec")
+			time.Sleep(1 * time.Second)
+		}
+	}
+
 	fileName := flag.Args()[0]
 
-	job := &Job{}
-	if err:=	processVideo(context.Background(), conf, fileName); err != nil {
+	job := &Job{
+		Config: conf,
+	}
+	if err := processVideo(ctx, job, fileName); err != nil {
 		job.DeleteErroredFiles()
-		log.Fatal(err)
+		logrus.Fatal(err)
 	} else {
 		job.DeleteFiles()
 	}
 }
 
-func processVideo(ctx context.Context, job *Job, config *videoproc.Config, fileName string) error{
-	scratchDir = conf.General.ScratchDir
-	evaluators := videoproc.MakeEvaluators(conf.Rule)
+func processVideo(ctx context.Context, job *Job, fileName string) error {
+	scratchDir = job.Config.General.ScratchDir
+	evaluators := videoproc.MakeEvaluators(job.Config.Rule)
 
 	info, err := mediainfo.Parse(context.Background(), fileName)
 	if err != nil {
@@ -80,6 +129,7 @@ func processVideo(ctx context.Context, job *Job, config *videoproc.Config, fileN
 			c.Video.Extra = v.Extra
 			c.Video.FormatVersion = v.FormatVersion
 			c.Video.FormatProfile = v.FormatProfile
+			c.Video.ScanType = v.ScanType
 
 		case *mediainfo.GeneralTrack:
 			logrus.Debugf("general %#v", v)
@@ -96,7 +146,7 @@ func processVideo(ctx context.Context, job *Job, config *videoproc.Config, fileN
 
 	decision := &videoproc.Rule{}
 
-	for i, rule := range conf.Rule {
+	for i, rule := range job.Config.Rule {
 		output, err := expr.Run(evaluators[i], c)
 		if err != nil {
 			logrus.Fatal(err)
@@ -108,7 +158,19 @@ func processVideo(ctx context.Context, job *Job, config *videoproc.Config, fileN
 
 		takeString(&decision.Comskip, rule.Comskip)
 		takeString(&decision.ComskipINI, rule.ComskipINI)
+		takeString(&decision.Profile, rule.Profile)
 		decision.Actions = append(decision.Actions, rule.Actions...)
+		copyEncodeRule(&decision.Encode, rule.Encode)
+	}
+
+	if decision.Profile != "" {
+		for _, profile := range job.Config.Profile {
+			if profile.Name == decision.Profile {
+				cloned := profile
+				copyEncodeRule(&cloned, decision.Encode)
+				decision.Encode = cloned
+			}
+		}
 	}
 
 	logrus.Debugf("About to execute: %#v", decision)
@@ -116,28 +178,37 @@ func processVideo(ctx context.Context, job *Job, config *videoproc.Config, fileN
 	var ffmpegOpts []string
 
 	if decision.Comskip == "chapter" || decision.Comskip == "comchap" || isTrue(decision.Comskip) {
-		commercials := job.RunComskip(fileName, decision)
+		commercials, err := runComskip(ctx, job, fileName, decision)
+		if err != nil {
+			return errors.Wrap(err, "could not run comskip")
+		}
 		//commercials := edlToCommercials("/loc/scratch/vp57433.edl")
 		if len(commercials) != 0 {
 			chapters := makeChapters(commercials, c.DurationSec)
 
 			if strings.HasSuffix(fileName, ".mkv") {
 				logrus.Warn("Swapping properties using mkvpropedit")
-				if err := editMKVChapters(fileName, chapters); err != nil {
+				if err := editMKVChapters(ctx, job, fileName, chapters); err != nil {
 					return errors.Wrap(err, "Could not edit MKV chapters")
 				}
-				return
+				return nil
 			} else {
 				buf := chaptersToFF(chapters)
 				logrus.Info(string(buf))
 
 				metaFile := filepath.Join(scratchDir, filepath.Base(fileName)+".ffmeta")
+				job.TrackFile(metaFile, false)
 				if err := ioutil.WriteFile(metaFile, buf, 0666); err != nil {
-					logrus.Fatal(err)
+					return err
 				}
 				ffmpegOpts = append(ffmpegOpts, "-i", metaFile, "-map_metadata", "1")
 			}
 		}
+	}
+
+	if len(decision.Actions) == 0 && len(ffmpegOpts) == 0 {
+		logrus.Debug("No actions determined, exiting")
+		return nil
 	}
 
 	for _, action := range decision.Actions {
@@ -152,6 +223,7 @@ func processVideo(ctx context.Context, job *Job, config *videoproc.Config, fileN
 	baseCmd := append([]string{
 		"-nostdin", "-i", fileName,
 	}, ffmpegOpts...)
+	baseCmd = append(baseCmd, "-metadata", "videoproc="+FLAG_VER)
 
 	destFile := stripExtension(fileName) + ".mkv"
 
@@ -159,10 +231,7 @@ func processVideo(ctx context.Context, job *Job, config *videoproc.Config, fileN
 	baseCmd = append(baseCmd, "-c", "copy", tmpOutFile)
 	logrus.Debugf("About to ffmpeg %#v", baseCmd)
 
-	cmd := exec.Command("ffmpeg", baseCmd...)
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stdout
-	if err := cmd.Run(); err != nil {
+	if err := runCommand(ctx, "ffmpeg", baseCmd...); err != nil {
 		logrus.Fatal(err)
 	}
 
@@ -177,22 +246,56 @@ func processVideo(ctx context.Context, job *Job, config *videoproc.Config, fileN
 			return errors.Wrap(err, "could not remove orig")
 		}
 	}
+	return nil
+}
+
+func copyEncodeRule(dst *videoproc.EncodeConfig, src videoproc.EncodeConfig) {
+	takeString(&dst.Video.Codec, src.Video.Codec)
+	takeString(&dst.Video.Preset, src.Video.Preset)
+	takeString(&dst.Video.CRF, src.Video.CRF)
+	takeString(&dst.Video.Level, src.Video.Level)
+	takeString(&dst.Audio.Codec, src.Audio.Codec)
+	takeString(&dst.Audio.Bitrate, src.Audio.Bitrate)
 }
 
 type TrackedFile struct {
-	Filename string
+	Filename  string
 	MissingOK bool
 }
 
 type Job struct {
+	Config       *videoproc.Config
 	filesTracked []TrackedFile
 }
 
 func (job *Job) TrackFile(fileName string, missingOK bool) {
 	job.filesTracked = append(job.filesTracked, TrackedFile{fileName, missingOK})
 }
+func (job *Job) DeleteErroredFiles() {
+	for _, entry := range job.filesTracked {
+		os.Remove(entry.Filename)
+	}
+}
 
-func editMKVChapters(fileName string, chapters []Chapter) error {
+func (job *Job) DeleteFiles() {
+	for _, entry := range job.filesTracked {
+		_, err := os.Stat(entry.Filename)
+		if err == nil {
+			logrus.Debugf("Deleting %s", entry.Filename)
+			os.Remove(entry.Filename)
+		} else {
+			if os.IsNotExist(err) {
+				if !entry.MissingOK {
+					logrus.Warnf("Expected to delete %s but it was missing", entry.Filename)
+				}
+			} else {
+				logrus.Warnf("Got error %s deleting %s", err.Error(), entry.Filename)
+			}
+		}
+	}
+}
+
+func editMKVChapters(ctx context.Context, job *Job, fileName string, chapters []Chapter) error {
 	var buf bytes.Buffer
 	for i, chapter := range chapters {
 		cnum := fmt.Sprintf("%02d", i+1)
@@ -200,11 +303,13 @@ func editMKVChapters(fileName string, chapters []Chapter) error {
 	}
 	logrus.Debug("chapterfile", buf.String())
 	chapterFile := filepath.Join(scratchDir, strings.Replace(filepath.Base(fileName), ".mkv", ".chapter", -1))
-	if err := ioutil.WriteFile(chapterFile, buf.Bytes(), 0666); err != nil {
+	err := ioutil.WriteFile(chapterFile, buf.Bytes(), 0666)
+	job.TrackFile(chapterFile, (err != nil))
+	if err != nil {
 		return err
 	}
 
-	return runCommand("mkvpropedit", fileName, "--chapters", chapterFile)
+	return runCommand(ctx, "mkvpropedit", fileName, "--chapters", chapterFile)
 }
 
 func timestampMKV(floatSeconds float64) string {
@@ -254,7 +359,7 @@ func chaptersToFF(chapters []Chapter) []byte {
 	return buf.Bytes()
 }
 
-func (job *Job) runComskip(ctx context.Context, fileName string, decision *videoproc.Rule) ([]Commercial, error) {
+func runComskip(ctx context.Context, job *Job, fileName string, decision *videoproc.Rule) ([]Commercial, error) {
 	logrus.Infof("About to run comskip")
 	csPrefix := "vp" + strconv.Itoa(os.Getpid())
 	cmd := exec.CommandContext(
@@ -266,8 +371,10 @@ func (job *Job) runComskip(ctx context.Context, fileName string, decision *video
 		"--verbose=1",
 		fileName,
 	)
-	cmd.Stdout = os.Stdout
+	sbuf := &stdbuf{Name: "stdout"}
+	cmd.Stdout = sbuf
 	cmd.Stderr = os.Stderr
+
 	logrus.Debug(cmd.Args)
 	absoluteBase := filepath.Join(scratchDir, csPrefix)
 	job.TrackFile(absoluteBase+".ccyes", true)
@@ -275,13 +382,34 @@ func (job *Job) runComskip(ctx context.Context, fileName string, decision *video
 	job.TrackFile(absoluteBase+".txt", true)
 	job.TrackFile(absoluteBase+".log", true)
 	if err := cmd.Run(); err != nil {
+		scanner := bufio.NewScanner(&sbuf.buf)
+		for scanner.Scan() {
+			if strings.TrimSpace(scanner.Text()) == "Commercials were not found." {
+				logrus.Debug("Detected failure in comskip but got comm not found, moving on.")
+				return nil, nil
+			}
+		}
+
 		return nil, errors.Wrap(err, "could not run comskip")
 	}
 
-	return edlToCommercials(absoluteBase+".edl"))
+	return edlToCommercials(absoluteBase + ".edl")
 }
 
-func edlToCommercials(edlFile string) ([]Commercial,error) {
+type stdbuf struct {
+	Name string
+	mu   sync.Mutex
+	buf  bytes.Buffer
+}
+
+func (b *stdbuf) Write(v []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	logrus.Debugf("%s: %s", b.Name, string(v))
+	return b.buf.Write(v)
+}
+
+func edlToCommercials(edlFile string) ([]Commercial, error) {
 	f, err := os.Open(edlFile)
 	if err != nil {
 		return nil, errors.Wrap(err, "could not open EDL")
@@ -290,7 +418,7 @@ func edlToCommercials(edlFile string) ([]Commercial,error) {
 	reader := csv.NewReader(f)
 	reader.Comma = '\t'
 	edits, err := reader.ReadAll()
-	if err != nil{
+	if err != nil {
 		return nil, errors.Wrap(err, "could not parse CSV")
 	}
 
@@ -301,7 +429,7 @@ func edlToCommercials(edlFile string) ([]Commercial,error) {
 		end, _ := strconv.ParseFloat(edit[1], 64)
 		commercials = append(commercials, Commercial{begin, end})
 	}
-	return commercials
+	return commercials, nil
 
 }
 

@@ -37,6 +37,14 @@
   version = "v1.0.2"
 
 [[projects]]
+  digest = "1:96294449af72253919beb3eff4ba5cc6063080b15cc1ebffc3b8510ef2cc55a0"
+  name = "github.com/nightlyone/lockfile"
+  packages = ["."]
+  pruneopts = "UT"
+  revision = "d487ed8593d2cb7638cf901ff9fc48f62c9a902f"
+  version = "v1.0.0"
+
+[[projects]]
   digest = "1:9e1d37b58d17113ec3cb5608ac0382313c5b59470b94ed97d0976e69c7022314"
   name = "github.com/pkg/errors"
   packages = ["."]
@@ -67,6 +75,7 @@
     "github.com/BurntSushi/toml",
     "github.com/antonmedv/expr",
     "github.com/antonmedv/expr/vm",
+    "github.com/nightlyone/lockfile",
     "github.com/pkg/errors",
     "github.com/sirupsen/logrus",
   ]
