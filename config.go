@@ -12,6 +12,7 @@ func ParseConfig(filename string) (*Config, error) {
 
 type Config struct {
 	General GeneralConfig
+	Profile []EncodeConfig
 	Rule    []Rule
 }
 
@@ -21,8 +22,29 @@ type Rule struct {
 	Comskip    string
 	ComskipINI string `toml:"comskip-ini"`
 	Actions    []string
+
+	Profile string
+	Encode  EncodeConfig
 }
 
 type GeneralConfig struct {
 	ScratchDir string `toml:"scratch-dir"`
+}
+
+type EncodeConfig struct {
+	Name        string
+	Deinterlace bool
+	Video       EncodeVideo
+	Audio       EncodeAudio
+}
+type EncodeVideo struct {
+	Codec  string
+	Preset string
+	CRF    string
+	Level  string
+}
+
+type EncodeAudio struct {
+	Codec   string
+	Bitrate string
 }

@@ -39,6 +39,7 @@ type VideoCtx struct {
 	Format        string
 	FormatVersion string
 	FormatProfile string
+	ScanType      string
 	Extra         map[string]string
 }
 

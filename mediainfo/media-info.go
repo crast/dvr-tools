@@ -63,6 +63,7 @@ type VideoTrack struct {
 	Width            QuotedInt `json:"Width"`
 	Height           QuotedInt `json:"Height"`
 	PixelAspectRatio string    `json:"PixelAspectRatio"`
+	ScanType         string    `json:"ScanType"`
 }
 
 type AudioTrack struct {
