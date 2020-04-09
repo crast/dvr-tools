@@ -211,28 +211,52 @@ func (s *State) Watcher(ctx context.Context) {
 	for i, p := range positions {
 		fp := float64(p.Position) / 1000.0
 		playtape = append(playtape, fp)
-		logrus.Infof(" -> %02d: %.1f", i, fp)
+		logrus.Debugf(" -> %02d: %.1f", i, fp)
 	}
+
+	durationSec := float64(video.Duration) / 1000.0
+
+	wl := &watchlog.WatchLog{
+		Filename: fileName,
+		Tape: playtape,
+		Note: "unknown",
+	}
+
 
 	if len(playtape) < 5 {
 		return
+	} else if  (durationSec-playtape[len(playtape)-1]) > 150.0 {
+		logrus.Warnf("Didn't watch full duration, marking")
+		wl.Note = "partial"
+// logrus.Debugf("Discarded playtape: %#v", playtape)
+// return
 	}
 
-	skips, consec := detectSkips(playtape)
+
+	wl.Skips, wl.Consec = watchlog.DetectSkips(playtape)
+
+	if len(wl.Skips) == 0 {
+		wl.Note = "noskip"
+	}
+
+	for i, skip := range wl.Skips {
+		logrus.Infof("Skip %d: %.1f => %.1f ( %s => %s )", i, skip.Begin, skip.End, timestampMKV(skip.Begin), timestampMKV(skip.End))
+	}
+
+	for i, r := range wl.Consec {
+		logrus.Infof("Consecutive %d: %.1f => %.1f ( %s => %s )", i, r.Begin, r.End, timestampMKV(r.Begin), timestampMKV(r.End))
+	}
 
 	jsonFileName := fileName + ".watchlog.json"
 	if watchLogDir != "" {
 		jsonFileName, err = watchlog.GenName(watchLogDir, fileName)
 		if err != nil {
 			logrus.Warnf("Failure making watchlog name: %s", err.Error())
+			return
 		}
 	}
 
-	err = jsonio.WriteFile(jsonFileName, &watchlog.WatchLog{
-		Tape:   playtape,
-		Consec: consec,
-		Skips:  skips,
-	})
+	err = jsonio.WriteFile(jsonFileName, wl)
 	if err != nil {
 		logrus.Warnf("Could not make watchlog %s: %s", jsonFileName, err.Error())
 	}
@@ -295,50 +319,6 @@ func (s *State) watcherMain(ctx context.Context, initialPos int64) ([]position, 
 	}
 	logrus.Warn("end of seeker loop")
 	return positions, nil
-}
-
-func detectSkips(playtape []float64) (skips, consec []watchlog.Region) {
-	logrus.Debugf("Detect skips %#v", playtape)
-	var currentConsec *watchlog.Region
-	var currentSkip *watchlog.Region
-
-	for i := 1; i < len(playtape); i++ {
-		current := playtape[i]
-		if difference := current - playtape[i-1]; difference > 12.0 {
-			currentConsec = nil
-			if currentSkip == nil || currentSkip.End < playtape[i-1] {
-				skips = append(skips, watchlog.Region{
-					Begin: playtape[i-1],
-					End:   current,
-				})
-				currentSkip = &skips[len(skips)-1]
-			} else {
-				currentSkip.End = playtape[i]
-			}
-		} else if difference > 0 {
-			if currentConsec == nil {
-				consec = append(consec, watchlog.Region{Begin: playtape[i-1], End: current})
-				currentConsec = &consec[len(consec)-1]
-			} else {
-				currentConsec.End = current
-			}
-		} else if difference < -4.0 {
-			if currentSkip != nil && currentSkip.End > current {
-				currentSkip.End = current
-			}
-			if currentConsec != nil && currentConsec.Begin > current {
-				currentConsec.Begin = current
-				currentConsec.End = current
-			}
-		}
-	}
-	for i, skip := range skips {
-		logrus.Infof("Skip %d: %.1f => %.1f ( %s => %s )", i, skip.Begin, skip.End, timestampMKV(skip.Begin), timestampMKV(skip.End))
-	}
-	for i, r := range consec {
-		logrus.Infof("Consecutive %d: %.1f => %.1f ( %s => %s )", i, r.Begin, r.End, timestampMKV(r.Begin), timestampMKV(r.End))
-	}
-	return skips, consec
 }
 
 func timestampMKV(floatSeconds float64) string {

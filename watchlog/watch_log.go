@@ -11,9 +11,10 @@ import (
 
 type WatchLog struct {
 	Filename string `json:"filename,omitempty"`
-	Tape     []float64
+	Note     string `json:",omitempty"`
 	Consec   []Region
 	Skips    []Region
+	Tape     []float64
 }
 
 type Region struct {

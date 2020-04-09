@@ -21,11 +21,13 @@ func WriteFile(filename string, v interface{}) error {
 	if err != nil {
 		return err
 	}
-	err = json.NewEncoder(f).Encode(v)
+	enc :=json.NewEncoder(f) 
+	enc.SetIndent("", "\t")
+	err = enc.Encode(v)
 	if err != nil {
 		f.Close()
 		return err
 	}
-return 	f.Close()
+	return f.Close()
 
 }
