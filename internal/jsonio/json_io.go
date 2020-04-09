@@ -21,7 +21,7 @@ func WriteFile(filename string, v interface{}) error {
 	if err != nil {
 		return err
 	}
-	enc :=json.NewEncoder(f) 
+	enc := json.NewEncoder(f)
 	enc.SetIndent("", "\t")
 	err = enc.Encode(v)
 	if err != nil {

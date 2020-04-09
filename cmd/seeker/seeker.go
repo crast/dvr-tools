@@ -218,20 +218,18 @@ func (s *State) Watcher(ctx context.Context) {
 
 	wl := &watchlog.WatchLog{
 		Filename: fileName,
-		Tape: playtape,
-		Note: "unknown",
+		Tape:     playtape,
+		Note:     "unknown",
 	}
-
 
 	if len(playtape) < 5 {
 		return
-	} else if  (durationSec-playtape[len(playtape)-1]) > 150.0 {
+	} else if (durationSec - playtape[len(playtape)-1]) > 150.0 {
 		logrus.Warnf("Didn't watch full duration, marking")
 		wl.Note = "partial"
-// logrus.Debugf("Discarded playtape: %#v", playtape)
-// return
+		// logrus.Debugf("Discarded playtape: %#v", playtape)
+		// return
 	}
-
 
 	wl.Skips, wl.Consec = watchlog.DetectSkips(playtape)
 

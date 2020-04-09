@@ -51,7 +51,6 @@ type MediaTrackMixin struct {
 	Extra         map[string]string `json:"extra"`
 }
 
-
 type GeneralTrack struct {
 	FileExtension string      `json:"FileExtension"`
 	Duration      QuotedFloat `json:"Duration"`
