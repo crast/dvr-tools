@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -305,6 +306,13 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 		logrus.Fatal(err)
 	}
 
+	if !deleteOriginal && fileName == destFile {
+		backupFile := filepath.Join(filepath.Dir(fileName), "backup.orig."+filepath.Base(fileName))
+		if err = os.Rename(fileName, backupFile); err != nil {
+			return errors.Wrap(err, "could not backup orig")
+		}
+	}
+
 	if err := fileio.Move(ctx, tmpOutFile, destFile); err != nil {
 		return errors.Wrap(err, "could not move")
 	}
@@ -556,7 +564,13 @@ func runCommand(ctx context.Context, prog string, args ...string) error {
 func ffmpegExtractFilters(ctx context.Context, job *Job, filename string, chapters []Chapter) ([]string, error) {
 	var vselect []string
 	for _, chapter := range chapters {
-		vselect = append(vselect, fmt.Sprintf("between(t,%.2f,%.2f)", chapter.Begin, chapter.End))
+		begin := chapter.Begin
+		end := chapter.End
+		if job.Config.General.RoundCuts {
+			begin = math.Floor(begin)
+			end = math.Ceil(end)
+		}
+		vselect = append(vselect, fmt.Sprintf("between(t,%.2f,%.2f)", begin, end))
 	}
 	betweens := strings.Join(vselect, "+")
 

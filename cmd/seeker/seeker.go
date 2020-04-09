@@ -13,6 +13,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -149,10 +150,10 @@ func globalPoller(ctx context.Context) {
 				Source: "poller",
 			}
 		}
-		if len(mc.Video) == 0 {
-			currentTimeout += addTimeout
-		} else {
+		if len(mc.Video) != 0 {
 			currentTimeout = smallTimeout
+		} else if currentTimeout < (30 * time.Second) {
+			currentTimeout += addTimeout
 		}
 
 	}
@@ -183,18 +184,25 @@ type State struct {
 }
 
 func (s *State) Watcher(ctx context.Context) {
+	defer func() {
+		mu.Lock()
+		delete(seen, s.Key)
+		mu.Unlock()
+	}()
+
 	buf, err := httpGet(ctx, s.Key)
 	if err != nil {
 		logrus.Warnf("get error: %s", err.Error())
-
 		return
 	}
 	var dest MediaContainer
 	err = xml.Unmarshal(buf, &dest)
 	if err != nil {
 		logrus.Warnf("xml error: %s", err.Error())
+		return
+
 	}
-	logrus.Warnf("%#v", dest)
+	logrus.Debugf("XML MediaContainer %#v", dest)
 
 	video := dest.Video[0]
 
@@ -263,9 +271,6 @@ func (s *State) Watcher(ctx context.Context) {
 func (s *State) watcherMain(ctx context.Context, initialPos int64) ([]position, error) {
 	var once sync.Once
 	shutdown := func() {
-		mu.Lock()
-		delete(seen, s.Key)
-		mu.Unlock()
 		close(s.Chan)
 	}
 	defer once.Do(shutdown)
@@ -307,13 +312,17 @@ func (s *State) watcherMain(ctx context.Context, initialPos int64) ([]position, 
 				logrus.Warnf("Unexplained zero event %v", update)
 			}
 			continue
-		} else if update.position.Position == positions[len(positions)-1].Position {
-			logrus.Debugf("Dropped update %v", update)
-			continue
 		}
 
-		positions = append(positions, update.position)
-		logrus.Infof("at %s", timestampMKV(float64(update.position.Position)/1000.0))
+		samePos := (update.position.Position == positions[len(positions)-1].Position)
+
+		if !samePos || strings.HasPrefix(update.Source, "media.") {
+			logrus.Infof("%s at %s", update.Source, timestampMKV(float64(update.position.Position)/1000.0))
+		}
+
+		if !samePos {
+			positions = append(positions, update.position)
+		}
 	}
 	logrus.Warn("end of seeker loop")
 	return positions, nil
