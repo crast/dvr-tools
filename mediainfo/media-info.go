@@ -28,6 +28,8 @@ func (at *AnyTrack) UnmarshalJSON(buf []byte) error {
 		dest = &VideoTrack{}
 	case "Audio":
 		dest = &AudioTrack{}
+	case "Menu":
+		dest = &MenuTrack{}
 	default:
 		dest = &MediaTrackMixin{}
 	}
@@ -40,13 +42,6 @@ type genericTrack struct {
 	Type string `json:"@type"`
 }
 
-type GeneralTrack struct {
-	FileExtension string      `json:"FileExtension"`
-	Duration      QuotedFloat `json:"Duration"`
-
-	MediaTrackMixin
-}
-
 type MediaTrackMixin struct {
 	SegmentType   string            `json:"@type"`
 	ID            string            `json:"ID"`
@@ -54,6 +49,14 @@ type MediaTrackMixin struct {
 	Format        string            `json:"Format"`
 	FormatVersion string            `json:"Format_Version"`
 	Extra         map[string]string `json:"extra"`
+}
+
+
+type GeneralTrack struct {
+	FileExtension string      `json:"FileExtension"`
+	Duration      QuotedFloat `json:"Duration"`
+
+	MediaTrackMixin
 }
 
 type VideoTrack struct {
@@ -67,5 +70,9 @@ type VideoTrack struct {
 }
 
 type AudioTrack struct {
+	MediaTrackMixin
+}
+
+type MenuTrack struct {
 	MediaTrackMixin
 }

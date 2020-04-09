@@ -68,6 +68,18 @@
   pruneopts = "UT"
   revision = "9dae0f8f577553e0f21298e18926efc9644c281d"
 
+[[projects]]
+  digest = "1:9797e567a891b2ac0f60f0490482837dbd26feefc86d7be103e376146be76357"
+  name = "gopkg.in/crast/app.v0"
+  packages = [
+    ".",
+    "crash",
+    "pgroup",
+  ]
+  pruneopts = "UT"
+  revision = "cbe1cedf747218818fd724077791546e26d5a470"
+  version = "v0.5"
+
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
@@ -78,6 +90,7 @@
     "github.com/nightlyone/lockfile",
     "github.com/pkg/errors",
     "github.com/sirupsen/logrus",
+    "gopkg.in/crast/app.v0",
   ]
   solver-name = "gps-cdcl"
   solver-version = 1

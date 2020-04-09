@@ -9,30 +9,63 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/crast/videoproc/internal/jsonio"
+	"github.com/crast/videoproc/watchlog"
 	"github.com/sirupsen/logrus"
+	app "gopkg.in/crast/app.v0"
 )
 
 var token string
 var plexServer string
+var watchLogDir string
 
 func main() {
 	debugMode := flag.Bool("debug", false, "Debug")
 	flag.StringVar(&token, "token", "", "Token")
 	flag.StringVar(&plexServer, "plex", "http://192.168.1.2:32400", "plex server")
+	flag.StringVar(&watchLogDir, "log-dir", "", "watch log dir")
 	flag.Parse()
 	if *debugMode {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
 	http.HandleFunc("/hook", handleHook)
-	go globalPoller(context.Background())
-	log.Fatal(http.ListenAndServe(":8081", nil))
+
+	baseCtx, cancel := context.WithCancel(context.Background())
+	app.AddCloser(func() error {
+		logrus.Debugf("Running closer")
+		cancel()
+		return nil
+	})
+
+	app.Go(func() {
+		globalPoller(baseCtx)
+	})
+
+	server := &http.Server{}
+
+	app.AddCloser(func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return server.Shutdown(ctx)
+	})
+
+	app.Go(func() error {
+		lis, err := net.Listen("tcp", ":8081")
+		if err != nil {
+			logrus.Fatal(err)
+		}
+		return server.Serve(lis)
+
+	})
+
+	app.Main()
 }
 
 func handleHook(w http.ResponseWriter, req *http.Request) {
@@ -55,15 +88,14 @@ func handleHook(w http.ResponseWriter, req *http.Request) {
 		}
 		if p.Header.Get("Content-Type") == "application/json" {
 			slurp, _ := ioutil.ReadAll(p)
-			fmt.Printf("Part JSON %s\n\n", slurp)
 			var dest Event
 			err := json.Unmarshal(slurp, &dest)
 			if err != nil {
 				logrus.Warn(err)
 				return
 			}
-			logrus.Printf("%#v", dest)
-			fire(&dest)
+			logrus.Debugf("%#v", dest)
+			go fire(&dest)
 		}
 
 	}
@@ -71,9 +103,10 @@ func handleHook(w http.ResponseWriter, req *http.Request) {
 }
 
 func globalPoller(ctx context.Context) {
-	const smallTimeout = 2000 * time.Millisecond
+	const smallTimeout = 2500 * time.Millisecond
 	const addTimeout = 50 * time.Millisecond
 	currentTimeout := smallTimeout
+	errCount := 0
 	for {
 		var when time.Time
 		select {
@@ -82,12 +115,21 @@ func globalPoller(ctx context.Context) {
 		case when = <-time.After(currentTimeout):
 		}
 
-		buf, err := httpGet(ctx, "/status/sessions")
+		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		buf, err := httpGet(reqCtx, "/status/sessions")
+		cancel()
 		if err != nil {
-			logrus.Warnf("Error in getting sessions: %s")
-			return
+			errCount += 1
+			logrus.Warnf("Error in getting sessions: %s", err.Error())
+			currentTimeout += addTimeout
+
+			if errCount > 100 {
+				logrus.Fatal("100 failures getting sessions, quitting.")
+			}
+			continue
 		}
 
+		errCount = 0
 		var mc MediaContainer
 		err = xml.Unmarshal(buf, &mc)
 		if err != nil {
@@ -102,7 +144,7 @@ func globalPoller(ctx context.Context) {
 			state.Chan <- PlayUpdate{
 				position: position{
 					Position: video.ViewOffset,
-					Time:     when,
+					Time:     when.UTC(),
 				},
 				Source: "poller",
 			}
@@ -140,7 +182,7 @@ type State struct {
 	cancel       func()
 }
 
-func (s *State) Poller(ctx context.Context) {
+func (s *State) Watcher(ctx context.Context) {
 	buf, err := httpGet(ctx, s.Key)
 	if err != nil {
 		logrus.Warnf("get error: %s", err.Error())
@@ -154,28 +196,158 @@ func (s *State) Poller(ctx context.Context) {
 	}
 	logrus.Warnf("%#v", dest)
 
-	var positions = []position{
-		{Position: dest.Video[0].ViewOffset, Time: time.Now()},
+	video := dest.Video[0]
+
+	fileName := video.Media[0].Part[0].File
+	logrus.Infof("############### PLAYTAPE BEGIN %s", fileName)
+
+	positions, err := s.watcherMain(ctx, video.ViewOffset)
+	if err != nil {
+		logrus.Warnf("Unexpected error in playtape %s", err.Error())
 	}
-	for update := range s.Chan {
-		if update.position.Position == positions[len(positions)-1].Position {
-			logrus.Debug("Dropped update", update)
-			continue
-		}
-		positions = append(positions, update.position)
-		idx := len(positions) - 1
-		if (positions[idx].Position - positions[idx-1].Position) > 11000 {
-			logrus.Info("Seek detected %d", idx)
-			first := idx - 50
-			if first < 0 {
-				first = 0
-			}
-			for i := first; i < len(positions); i++ {
-				logrus.Infof(" -> %02d: %d", i, positions[i].Position)
-			}
+	logrus.Infof("############### PLAYTAPE STOPPED %s", fileName)
+
+	var playtape []float64
+	for i, p := range positions {
+		fp := float64(p.Position) / 1000.0
+		playtape = append(playtape, fp)
+		logrus.Infof(" -> %02d: %.1f", i, fp)
+	}
+
+	if len(playtape) < 5 {
+		return
+	}
+
+	skips, consec := detectSkips(playtape)
+
+	jsonFileName := fileName + ".watchlog.json"
+	if watchLogDir != "" {
+		jsonFileName, err = watchlog.GenName(watchLogDir, fileName)
+		if err != nil {
+			logrus.Warnf("Failure making watchlog name: %s", err.Error())
 		}
 	}
 
+	err = jsonio.WriteFile(jsonFileName, &watchlog.WatchLog{
+		Tape:   playtape,
+		Consec: consec,
+		Skips:  skips,
+	})
+	if err != nil {
+		logrus.Warnf("Could not make watchlog %s: %s", jsonFileName, err.Error())
+	}
+}
+
+func (s *State) watcherMain(ctx context.Context, initialPos int64) ([]position, error) {
+	var once sync.Once
+	shutdown := func() {
+		mu.Lock()
+		delete(seen, s.Key)
+		mu.Unlock()
+		close(s.Chan)
+	}
+	defer once.Do(shutdown)
+
+	var positions = []position{
+		{Position: initialPos, Time: time.Now().UTC()},
+	}
+
+	stopTicker := time.NewTicker(10 * time.Second)
+	stopCounts := 0
+
+	for {
+		var update PlayUpdate
+		var ok bool
+		select {
+		case <-ctx.Done():
+			return positions, ctx.Err()
+		case <-stopTicker.C:
+			stopCounts += 1
+			if stopCounts >= 7 {
+				once.Do(shutdown)
+			}
+			continue
+		case update, ok = <-s.Chan:
+			if !ok {
+				return positions, nil
+			}
+		}
+
+		if update.Source == "media.stop" {
+			logrus.Debug("stop timer set")
+			stopCounts += 3
+		} else if stopCounts > 0 && update.Position != 0 {
+			stopCounts = 0
+		}
+
+		if update.position.Position == 0 {
+			if update.Source != "media.stop" && update.Source != "media.play" {
+				logrus.Warnf("Unexplained zero event %v", update)
+			}
+			continue
+		} else if update.position.Position == positions[len(positions)-1].Position {
+			logrus.Debugf("Dropped update %v", update)
+			continue
+		}
+
+		positions = append(positions, update.position)
+		logrus.Infof("at %s", timestampMKV(float64(update.position.Position)/1000.0))
+	}
+	logrus.Warn("end of seeker loop")
+	return positions, nil
+}
+
+func detectSkips(playtape []float64) (skips, consec []watchlog.Region) {
+	logrus.Debugf("Detect skips %#v", playtape)
+	var currentConsec *watchlog.Region
+	var currentSkip *watchlog.Region
+
+	for i := 1; i < len(playtape); i++ {
+		current := playtape[i]
+		if difference := current - playtape[i-1]; difference > 12.0 {
+			currentConsec = nil
+			if currentSkip == nil || currentSkip.End < playtape[i-1] {
+				skips = append(skips, watchlog.Region{
+					Begin: playtape[i-1],
+					End:   current,
+				})
+				currentSkip = &skips[len(skips)-1]
+			} else {
+				currentSkip.End = playtape[i]
+			}
+		} else if difference > 0 {
+			if currentConsec == nil {
+				consec = append(consec, watchlog.Region{Begin: playtape[i-1], End: current})
+				currentConsec = &consec[len(consec)-1]
+			} else {
+				currentConsec.End = current
+			}
+		} else if difference < -4.0 {
+			if currentSkip != nil && currentSkip.End > current {
+				currentSkip.End = current
+			}
+			if currentConsec != nil && currentConsec.Begin > current {
+				currentConsec.Begin = current
+				currentConsec.End = current
+			}
+		}
+	}
+	for i, skip := range skips {
+		logrus.Infof("Skip %d: %.1f => %.1f ( %s => %s )", i, skip.Begin, skip.End, timestampMKV(skip.Begin), timestampMKV(skip.End))
+	}
+	for i, r := range consec {
+		logrus.Infof("Consecutive %d: %.1f => %.1f ( %s => %s )", i, r.Begin, r.End, timestampMKV(r.Begin), timestampMKV(r.End))
+	}
+	return skips, consec
+}
+
+func timestampMKV(floatSeconds float64) string {
+	rawSeconds := int(floatSeconds)
+	seconds := rawSeconds % 60
+	rawMinutes := rawSeconds / 60
+	hours := rawMinutes / 60
+
+	return fmt.Sprintf("%02d:%02d:%02d.%03d", hours, rawMinutes%60, seconds, int((floatSeconds-float64(rawSeconds))*1000.0))
 }
 
 type position struct {
@@ -201,7 +373,7 @@ func fire(event *Event) {
 		state.Chan <- PlayUpdate{
 			position: position{
 				Position: event.Metadata.ViewOffset,
-				Time:     time.Now(),
+				Time:     time.Now().UTC(),
 			},
 			Source: event.Event,
 		}
@@ -219,7 +391,7 @@ func ensureState(key string) *State {
 			Chan:   make(chan PlayUpdate),
 			cancel: cancel,
 		}
-		go state.Poller(ctx)
+		go state.Watcher(ctx)
 		seen[key] = state
 	}
 	return state
@@ -235,6 +407,8 @@ type Video struct {
 	Key        string `xml:"key,attr"`
 	ViewOffset int64  `xml:"viewOffset,attr"`
 	ParentKey  string `xml:"parentKey,attr"`
+	Type       string `xml:"type,attr"`
+	Duration   int64  `xml:"duration,attr"`
 
 	Media []Media
 	Genre []Genre

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/crast/videoproc"
+	"github.com/crast/videoproc/internal/fileio"
 	"github.com/crast/videoproc/mediainfo"
 
 	"github.com/antonmedv/expr"
@@ -27,12 +28,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const FLAG_VER = "2"
+const FLAG_VER = "3"
 
 var configFile string
 var debugMode bool
 var scratchDir string
 var deleteOriginal bool
+var useExistingChapters bool
 
 func main() {
 	defaultConfigFile := "tmp/test.toml"
@@ -46,6 +48,7 @@ func main() {
 	flag.BoolVar(&debugMode, "debug", false, "Debug Mode")
 	flag.StringVar(&configFile, "config", defaultConfigFile, "TOML config file")
 	flag.BoolVar(&deleteOriginal, "delete-orig", false, "Delete original file")
+	flag.BoolVar(&useExistingChapters, "existing-chapters", false, "Use existing chapters if possible")
 	flag.StringVar(&lockFile, "lock-file", "", "Lock on this file")
 	flag.Parse()
 	if debugMode {
@@ -119,6 +122,8 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 	c := videoproc.EvalCtx{
 		Name: filepath.Base(fileName),
 	}
+	isMKV := false
+	hasChapters := false
 	for _, track := range info.Media.Tracks {
 		switch v := track.Track.(type) {
 		case *mediainfo.VideoTrack:
@@ -133,12 +138,17 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 
 		case *mediainfo.GeneralTrack:
 			logrus.Debugf("general %#v", v)
+			if v.Format == "Matroska" {
+				isMKV = true
+			}
 			c.Format = v.Format
 			c.DurationSec = v.Duration.Float()
 
 		case *mediainfo.AudioTrack:
 			c.Audio.Format = v.Format
 			c.Audio.Extra = v.Extra
+		case *mediainfo.MenuTrack:
+			hasChapters = true
 		}
 	}
 
@@ -175,33 +185,57 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 
 	logrus.Debugf("About to execute: %#v", decision)
 
+	hasMKVChapters := isMKV && hasChapters
+
 	var ffmpegOpts []string
 
 	if decision.Comskip == "chapter" || decision.Comskip == "comchap" || isTrue(decision.Comskip) {
-		commercials, err := runComskip(ctx, job, fileName, decision)
-		if err != nil {
-			return errors.Wrap(err, "could not run comskip")
+		var chapters []Chapter
+		if useExistingChapters {
+			logrus.Warn("extract chapters from existing")
+			chapters, err = extractExistingChapters(ctx, job, fileName)
+			if err != nil {
+				return err
+			}
+			if len(chapters) != 0 {
+				hasMKVChapters = true
+			}
+
+		} else {
+			commercials, err := runComskip(ctx, job, fileName, decision)
+			if err != nil {
+				return errors.Wrap(err, "could not run comskip")
+			}
+			if len(commercials) != 0 {
+				chapters = makeChapters(commercials, c.DurationSec)
+			}
+
 		}
-		//commercials := edlToCommercials("/loc/scratch/vp57433.edl")
-		if len(commercials) != 0 {
-			chapters := makeChapters(commercials, c.DurationSec)
+		if len(chapters) != 0 {
 
-			if strings.HasSuffix(fileName, ".mkv") {
-				logrus.Warn("Swapping properties using mkvpropedit")
-				if err := editMKVChapters(ctx, job, fileName, chapters); err != nil {
-					return errors.Wrap(err, "Could not edit MKV chapters")
+			if decision.Comskip == "chapter" || decision.Comskip == "comchap" {
+				if isMKV {
+					logrus.Warn("Swapping properties using mkvpropedit")
+					if err := editMKVChapters(ctx, job, fileName, chapters); err != nil {
+						return errors.Wrap(err, "Could not edit MKV chapters")
+					}
+					return nil
+				} else {
+					buf := chaptersToFF(chapters)
+					logrus.Info(string(buf))
+
+					metaFile := filepath.Join(scratchDir, filepath.Base(fileName)+".ffmeta")
+					job.TrackFile(metaFile, false)
+					if err := ioutil.WriteFile(metaFile, buf, 0666); err != nil {
+						return err
+					}
+					ffmpegOpts = append(ffmpegOpts, "-i", metaFile, "-map_metadata", "1")
 				}
-				return nil
 			} else {
-				buf := chaptersToFF(chapters)
-				logrus.Info(string(buf))
-
-				metaFile := filepath.Join(scratchDir, filepath.Base(fileName)+".ffmeta")
-				job.TrackFile(metaFile, false)
-				if err := ioutil.WriteFile(metaFile, buf, 0666); err != nil {
-					return err
-				}
-				ffmpegOpts = append(ffmpegOpts, "-i", metaFile, "-map_metadata", "1")
+				extraArgs, _ := ffmpegExtractFilters(ctx, job, fileName, nonCommercialChapters(chapters))
+				logrus.Warn("Extra Filters %+v", extraArgs)
+				ffmpegOpts = append(ffmpegOpts, extraArgs...)
+				//				return errors.New("TODO")
 			}
 		}
 	}
@@ -220,26 +254,59 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 		}
 	}
 
+	inputFileName := fileName
+	if hasMKVChapters {
+		logrus.Info("Has MKV chapters, we have to clone the input sadly.")
+		tmpMKV := filepath.Join(scratchDir, filepath.Base(stripExtension(fileName))+".nochap.mkv")
+		job.TrackFile(tmpMKV, true)
+		if err := fileio.Copy(ctx, fileName, tmpMKV); err != nil {
+			return errors.Wrap(err, "could not copy file")
+		}
+		if err := runCommand(ctx, "mkvpropedit", tmpMKV, "--chapters", ""); err != nil {
+			return errors.Wrap(err, "could not elide chapters")
+		}
+		inputFileName = tmpMKV
+	}
+
 	baseCmd := append([]string{
-		"-nostdin", "-i", fileName,
+		"-nostdin", "-i", inputFileName,
 	}, ffmpegOpts...)
 	baseCmd = append(baseCmd, "-metadata", "videoproc="+FLAG_VER)
 
 	destFile := stripExtension(fileName) + ".mkv"
 
 	tmpOutFile := filepath.Join(scratchDir, filepath.Base(destFile))
-	baseCmd = append(baseCmd, "-c", "copy", tmpOutFile)
+	if decision.Encode.Video.Codec == "" && decision.Encode.Audio.Codec == "" {
+		baseCmd = append(baseCmd, "-c", "copy", tmpOutFile)
+	} else {
+		addArgs := func(args ...string) {
+			baseCmd = append(baseCmd, args...)
+		}
+		addSimpleArg := func(input string, flag string) {
+			if input != "" {
+				addArgs(flag, input)
+			}
+		}
+		de := decision.Encode
+		addArgs("-c:v", de.Video.Codec)
+		addSimpleArg(de.Video.Preset, "-preset")
+		addSimpleArg(de.Video.CRF, "-crf")
+		addSimpleArg(de.Video.Level, "-level")
+		addArgs("-c:a", de.Audio.Codec)
+		addSimpleArg(de.Audio.Bitrate, "-b:a")
+		if de.Deinterlace {
+			//addArgs("-vf", "yadif")
+		}
+		addArgs(tmpOutFile)
+	}
 	logrus.Debugf("About to ffmpeg %#v", baseCmd)
 
 	if err := runCommand(ctx, "ffmpeg", baseCmd...); err != nil {
 		logrus.Fatal(err)
 	}
 
-	if err := os.Rename(tmpOutFile, destFile); err != nil {
-		logrus.Infof("got error with naive rename %s; going to use 'mv' instead", err.Error())
-		if err := runCommand(ctx, "mv", "--", tmpOutFile, destFile); err != nil {
-			return errors.Wrap(err, "could not run mv")
-		}
+	if err := fileio.Move(ctx, tmpOutFile, destFile); err != nil {
+		return errors.Wrap(err, "could not move")
 	}
 	if deleteOriginal && fileName != destFile {
 		if err := os.Remove(fileName); err != nil {
@@ -249,6 +316,16 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 	return nil
 }
 
+func nonCommercialChapters(chapters []Chapter) []Chapter {
+	var output []Chapter
+	for _, c := range chapters {
+		if !c.IsCommercial {
+			output = append(output, c)
+		}
+	}
+	return output
+}
+
 func copyEncodeRule(dst *videoproc.EncodeConfig, src videoproc.EncodeConfig) {
 	takeString(&dst.Video.Codec, src.Video.Codec)
 	takeString(&dst.Video.Preset, src.Video.Preset)
@@ -256,6 +333,9 @@ func copyEncodeRule(dst *videoproc.EncodeConfig, src videoproc.EncodeConfig) {
 	takeString(&dst.Video.Level, src.Video.Level)
 	takeString(&dst.Audio.Codec, src.Audio.Codec)
 	takeString(&dst.Audio.Bitrate, src.Audio.Bitrate)
+	if src.Deinterlace {
+		dst.Deinterlace = true
+	}
 }
 
 type TrackedFile struct {
@@ -471,4 +551,69 @@ func runCommand(ctx context.Context, prog string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func ffmpegExtractFilters(ctx context.Context, job *Job, filename string, chapters []Chapter) ([]string, error) {
+	var vselect []string
+	for _, chapter := range chapters {
+		vselect = append(vselect, fmt.Sprintf("between(t,%.2f,%.2f)", chapter.Begin, chapter.End))
+	}
+	betweens := strings.Join(vselect, "+")
+
+	//	extractedFile := filepath.Join(scratchDir, filepath.Base(stripExtension(filename))+".extracted.mkv")
+	args := []string{
+		//		"-nostdin", "-i", filename,
+		"-vf", fmt.Sprintf("select='%s',setpts=N/FRAME_RATE/TB", betweens),
+		"-af", fmt.Sprintf("aselect='%s',asetpts=N/SR/TB", betweens),
+		//		"-c", "copy",
+		//		extractedFile,
+		"-map_metadata", "-1",
+	}
+
+	//:= "select='between(t,4,6.5)+between(t,17,26)+between(t,74,91)',setpts=N/FRAME_RATE/TB" -af "aselect='between(t,4,6.5)+between(t,17,26)+between(t,74,91)"
+	//job.TrackFile(extractedFile, false)
+	//	logrus.Infof("About to extract ffmpeg")
+	//	err := runCommand(ctx, "ffmpeg", args...)
+	return args, nil
+
+}
+
+func extractExistingChapters(ctx context.Context, job *Job, fileName string) ([]Chapter, error) {
+	chapterFile := filepath.Join(scratchDir, filepath.Base(stripExtension(fileName))+".extracted.ffmeta")
+	err := runCommand(ctx, "ffmpeg", "-i", fileName, "-f", "ffmetadata", chapterFile)
+	job.TrackFile(chapterFile, err != nil)
+	if err != nil {
+		return nil, err
+	}
+	buf, err := ioutil.ReadFile(chapterFile)
+	if err != nil {
+		return nil, err
+	}
+	var chapters []Chapter
+	scanner := bufio.NewScanner(bytes.NewReader(buf))
+	var timebase int
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "[CHAPTER]" {
+			chapters = append(chapters, Chapter{})
+		} else if len(chapters) != 0 {
+			c := &chapters[len(chapters)-1]
+			parts := strings.SplitN(line, "=", 2)
+			switch strings.ToUpper(parts[0]) {
+			case "TIMEBASE":
+				timebase, _ = strconv.Atoi(strings.Split(parts[1], "/")[1])
+			case "START":
+				v, _ := strconv.Atoi(parts[1])
+				c.Begin = float64(v) / float64(timebase)
+			case "END":
+				v, _ := strconv.Atoi(parts[1])
+				c.End = float64(v) / float64(timebase)
+			case "TITLE":
+				c.Name = parts[1]
+				c.IsCommercial = strings.HasPrefix(c.Name, "Commercial")
+			}
+		}
+	}
+	logrus.Warn(chapters)
+	return chapters, nil
 }
