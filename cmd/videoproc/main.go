@@ -22,6 +22,7 @@ import (
 	"github.com/crast/videoproc"
 	"github.com/crast/videoproc/internal/fileio"
 	"github.com/crast/videoproc/mediainfo"
+	"github.com/crast/videoproc/watchlog"
 
 	"github.com/antonmedv/expr"
 	"github.com/nightlyone/lockfile"
@@ -194,12 +195,36 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 		var chapters []Chapter
 		if useExistingChapters {
 			logrus.Warn("extract chapters from existing")
-			chapters, err = extractExistingChapters(ctx, job, fileName)
-			if err != nil {
-				return err
+			var wlchapters []Chapter
+			var wl *watchlog.WatchLog
+			if wlDir := job.Config.General.WatchLogDir; wlDir != "" {
+				logrus.Debug("check watchlog")
+				wl, err = getWatchLogIfExists(ctx, wlDir, fileName)
+				if err != nil {
+					return err
+				} else if wl != nil {
+					logrus.Info("got watchlog")
+					wlchapters = watchLogChapters(wl)
+					if wl.Note == "prefer" {
+						logrus.Info("Preferring watchlog chapters")
+						chapters = wlchapters
+					}
+				}
 			}
-			if len(chapters) != 0 {
-				hasMKVChapters = true
+
+			if wl == nil || wl.Note != "prefer" {
+				chapters, err = extractExistingChapters(ctx, job, fileName)
+				if err != nil {
+					return err
+				}
+				if len(chapters) != 0 {
+					hasMKVChapters = true
+				}
+
+			}
+
+			if len(chapters) == 0 && len(wlchapters) != 0 {
+				chapters = wlchapters
 			}
 
 		} else {
@@ -296,7 +321,16 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 		addArgs("-c:a", de.Audio.Codec)
 		addSimpleArg(de.Audio.Bitrate, "-b:a")
 		if de.Deinterlace {
-			//addArgs("-vf", "yadif")
+			modArg := false
+			for i, arg := range baseCmd {
+				if arg == "-vf" {
+					baseCmd[i+1] += ",yadif"
+					modArg=true
+				} 
+			}
+			if !modArg {
+				addArgs("-vf", "yadif")
+			}
 		}
 		addArgs(tmpOutFile)
 	}
@@ -630,4 +664,36 @@ func extractExistingChapters(ctx context.Context, job *Job, fileName string) ([]
 	}
 	logrus.Warn(chapters)
 	return chapters, nil
+}
+
+func getWatchLogIfExists(ctx context.Context, wlDir, fileName string) (*watchlog.WatchLog, error) {
+	wlFile, err := watchlog.GenName(wlDir, fileName)
+	if err != nil {
+		return nil, errors.Wrap(err, "watchlog")
+	}
+
+	logrus.Infof("watchlog %s", wlFile)
+
+	if !fileio.IsFile(wlFile) {
+		logrus.Infof("watchlog %s does not exist", wlFile)
+		return nil, nil
+	}
+
+	wl, err := watchlog.Parse(wlFile)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse watchlog")
+	}
+	return wl, nil
+}
+
+func watchLogChapters(wl *watchlog.WatchLog) []Chapter {
+	_, consec := watchlog.DetectSkips(wl.Tape)
+	var chapters []Chapter
+	for _, r := range consec {
+		chapters = append(chapters, Chapter{
+			Begin: r.Begin,
+			End:   r.End,
+		})
+	}
+	return chapters
 }
