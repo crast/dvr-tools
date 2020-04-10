@@ -13,12 +13,14 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/crast/videoproc/internal/jsonio"
 	"github.com/crast/videoproc/watchlog"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	app "gopkg.in/crast/app.v0"
 )
@@ -142,12 +144,13 @@ func globalPoller(ctx context.Context) {
 			mu.Lock()
 			state := ensureState(video.Key)
 			mu.Unlock()
+			if video.ViewOffset == nil {
+				logrus.Warn("nil viewOffset", video)
+			}
 			state.Chan <- PlayUpdate{
-				position: position{
-					Position: video.ViewOffset,
-					Time:     when.UTC(),
-				},
-				Source: "poller",
+				ViewOffset: video.ViewOffset,
+				Time:       when.UTC(),
+				Source:     "poll",
 			}
 		}
 		if len(mc.Video) != 0 {
@@ -168,7 +171,7 @@ type Event struct {
 type EventMeta struct {
 	LibrarySectionType string
 	Key                string `json:"key"`
-	ViewOffset         int64
+	ViewOffset         *int64
 }
 
 var mu sync.Mutex
@@ -209,37 +212,55 @@ func (s *State) Watcher(ctx context.Context) {
 	fileName := video.Media[0].Part[0].File
 	logrus.Infof("############### PLAYTAPE BEGIN %s", fileName)
 
-	positions, err := s.watcherMain(ctx, video.ViewOffset)
+	jsonFileName := fileName + ".watchlog.json"
+	if watchLogDir != "" {
+		jsonFileName, err = watchlog.GenName(watchLogDir, fileName)
+		if err != nil {
+			logrus.Warnf("Failure making watchlog name: %s", err.Error())
+			return
+		}
+	}
+
+	wl, err := watchlog.Parse(jsonFileName)
+	if err != nil {
+		if !os.IsNotExist(errors.Cause(err)) {
+			logrus.Warnf("Failure parsing old watchlog: %s", err.Error())
+			return
+		}
+
+		wl = &watchlog.WatchLog{
+			Note: "unknown",
+		}
+	} else {
+		logrus.Infof("restored playtape with %d points", len(wl.Tape))
+	}
+
+	wl.Filename = fileName
+
+	positions, err := s.watcherMain(ctx)
 	if err != nil {
 		logrus.Warnf("Unexpected error in playtape %s", err.Error())
 	}
 	logrus.Infof("############### PLAYTAPE STOPPED %s", fileName)
 
-	var playtape []float64
 	for i, p := range positions {
 		fp := float64(p.Position) / 1000.0
-		playtape = append(playtape, fp)
+		wl.Tape = append(wl.Tape, fp)
 		logrus.Debugf(" -> %02d: %.1f", i, fp)
 	}
 
 	durationSec := float64(video.Duration) / 1000.0
 
-	wl := &watchlog.WatchLog{
-		Filename: fileName,
-		Tape:     playtape,
-		Note:     "unknown",
-	}
-
-	if len(playtape) < 5 {
+	if len(wl.Tape) < 5 {
 		return
-	} else if (durationSec - playtape[len(playtape)-1]) > 150.0 {
+	} else if (durationSec - wl.Tape[len(wl.Tape)-1]) > 150.0 {
 		logrus.Warnf("Didn't watch full duration, marking")
 		wl.Note = "partial"
 		// logrus.Debugf("Discarded playtape: %#v", playtape)
 		// return
 	}
 
-	wl.Skips, wl.Consec = watchlog.DetectSkips(playtape)
+	wl.Skips, wl.Consec = watchlog.DetectSkips(wl.Tape)
 
 	if len(wl.Skips) == 0 {
 		wl.Note = "noskip"
@@ -253,22 +274,13 @@ func (s *State) Watcher(ctx context.Context) {
 		logrus.Infof("Consecutive %d: %.1f => %.1f ( %s => %s )", i, r.Begin, r.End, timestampMKV(r.Begin), timestampMKV(r.End))
 	}
 
-	jsonFileName := fileName + ".watchlog.json"
-	if watchLogDir != "" {
-		jsonFileName, err = watchlog.GenName(watchLogDir, fileName)
-		if err != nil {
-			logrus.Warnf("Failure making watchlog name: %s", err.Error())
-			return
-		}
-	}
-
 	err = jsonio.WriteFile(jsonFileName, wl)
 	if err != nil {
 		logrus.Warnf("Could not make watchlog %s: %s", jsonFileName, err.Error())
 	}
 }
 
-func (s *State) watcherMain(ctx context.Context, initialPos int64) ([]position, error) {
+func (s *State) watcherMain(ctx context.Context) ([]position, error) {
 	var once sync.Once
 	shutdown := func() {
 		close(s.Chan)
@@ -276,7 +288,7 @@ func (s *State) watcherMain(ctx context.Context, initialPos int64) ([]position, 
 	defer once.Do(shutdown)
 
 	var positions = []position{
-		{Position: initialPos, Time: time.Now().UTC()},
+		//(<-s.Chan).position,
 	}
 
 	stopTicker := time.NewTicker(10 * time.Second)
@@ -303,25 +315,31 @@ func (s *State) watcherMain(ctx context.Context, initialPos int64) ([]position, 
 		if update.Source == "media.stop" {
 			logrus.Debug("stop timer set")
 			stopCounts += 3
-		} else if stopCounts > 0 && update.Position != 0 {
+		} else if stopCounts > 0 && update.ViewOffset != nil {
 			stopCounts = 0
 		}
 
-		if update.position.Position == 0 {
+		if len(positions) > 0 && update.ViewOffset != nil && *update.ViewOffset == 0 && positions[len(positions)-1].Position > 13000 {
 			if update.Source != "media.stop" && update.Source != "media.play" {
 				logrus.Warnf("Unexplained zero event %v", update)
 			}
 			continue
 		}
 
-		samePos := (update.position.Position == positions[len(positions)-1].Position)
+		if update.ViewOffset == nil {
+			logrus.Info(update.Source)
+			continue
+		}
+		offset := *update.ViewOffset
+
+		samePos := (len(positions) > 0 && offset == positions[len(positions)-1].Position)
 
 		if !samePos || strings.HasPrefix(update.Source, "media.") {
-			logrus.Infof("%s at %s", update.Source, timestampMKV(float64(update.position.Position)/1000.0))
+			logrus.Infof("%s at %s", update.Source, timestampMKV(float64(offset)/1000.0))
 		}
 
 		if !samePos {
-			positions = append(positions, update.position)
+			positions = append(positions, position{offset, update.Time})
 		}
 	}
 	logrus.Warn("end of seeker loop")
@@ -343,8 +361,9 @@ type position struct {
 }
 
 type PlayUpdate struct {
-	position
-	Source string
+	ViewOffset *int64
+	Time       time.Time
+	Source     string
 }
 
 func fire(event *Event) {
@@ -355,15 +374,17 @@ func fire(event *Event) {
 
 	case "media.pause", "media.resume", "media.stop", "media.play":
 		logrus.Debugf("event %s %#v", event.Event, event)
+		if event.Metadata.ViewOffset == nil {
+			logrus.Warnf("nil viewoffset %s", event.Event)
+		}
 
 		state := ensureState(event.Metadata.Key)
 		state.Chan <- PlayUpdate{
-			position: position{
-				Position: event.Metadata.ViewOffset,
-				Time:     time.Now().UTC(),
-			},
-			Source: event.Event,
+			ViewOffset: event.Metadata.ViewOffset,
+			Time:       time.Now().UTC(),
+			Source:     event.Event,
 		}
+
 	default:
 		logrus.Warnf("Unknown event %s %#v", event.Event, event)
 	}
@@ -392,7 +413,7 @@ type MediaContainer struct {
 
 type Video struct {
 	Key        string `xml:"key,attr"`
-	ViewOffset int64  `xml:"viewOffset,attr"`
+	ViewOffset *int64 `xml:"viewOffset,attr"`
 	ParentKey  string `xml:"parentKey,attr"`
 	Type       string `xml:"type,attr"`
 	Duration   int64  `xml:"duration,attr"`
