@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/crast/videoproc/internal/jsonio"
+	"github.com/crast/videoproc/internal/timescale"
 )
 
 type WatchLog struct {
@@ -14,12 +15,12 @@ type WatchLog struct {
 	Note     string `json:",omitempty"`
 	Consec   []Region
 	Skips    []Region
-	Tape     []float64
+	Tape     []timescale.Offset
 }
 
 type Region struct {
-	Begin float64
-	End   float64
+	Begin timescale.Offset
+	End   timescale.Offset
 }
 
 // FilterConsec filters junk from the consec list

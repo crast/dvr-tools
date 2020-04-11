@@ -1,8 +1,11 @@
 package watchlog
 
-import "github.com/sirupsen/logrus"
+import (
+	"github.com/crast/videoproc/internal/timescale"
+	"github.com/sirupsen/logrus"
+)
 
-func DetectSkips(playtape []float64) (skips, consec []Region) {
+func DetectSkips(playtape []timescale.Offset) (skips, consec []Region) {
 	logrus.Debugf("Detect skips %#v", playtape)
 	var currentConsec *Region
 	var currentSkip *Region

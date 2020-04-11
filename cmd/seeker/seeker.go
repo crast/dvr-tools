@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/crast/videoproc/internal/jsonio"
+	"github.com/crast/videoproc/internal/timescale"
 	"github.com/crast/videoproc/watchlog"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -244,12 +245,12 @@ func (s *State) Watcher(ctx context.Context) {
 	logrus.Infof("############### PLAYTAPE STOPPED %s", fileName)
 
 	for i, p := range positions {
-		fp := float64(p.Position) / 1000.0
+		fp := timescale.FromMillis(p.Position)
 		wl.Tape = append(wl.Tape, fp)
 		logrus.Debugf(" -> %02d: %.1f", i, fp)
 	}
 
-	durationSec := float64(video.Duration) / 1000.0
+	durationSec := timescale.FromMillis(video.Duration)
 
 	if len(wl.Tape) < 5 {
 		return
@@ -267,11 +268,11 @@ func (s *State) Watcher(ctx context.Context) {
 	}
 
 	for i, skip := range wl.Skips {
-		logrus.Infof("Skip %d: %.1f => %.1f ( %s => %s )", i, skip.Begin, skip.End, timestampMKV(skip.Begin), timestampMKV(skip.End))
+		logrus.Infof("Skip %d: %.1f => %.1f ( %s => %s )", i, skip.Begin, skip.End, timescale.TimestampMKV(skip.Begin), timescale.TimestampMKV(skip.End))
 	}
 
 	for i, r := range wl.Consec {
-		logrus.Infof("Consecutive %d: %.1f => %.1f ( %s => %s )", i, r.Begin, r.End, timestampMKV(r.Begin), timestampMKV(r.End))
+		logrus.Infof("Consecutive %d: %.1f => %.1f ( %s => %s )", i, r.Begin, r.End, timescale.TimestampMKV(r.Begin), timescale.TimestampMKV(r.End))
 	}
 
 	err = jsonio.WriteFile(jsonFileName, wl)

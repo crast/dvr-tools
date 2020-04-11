@@ -325,8 +325,8 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 			for i, arg := range baseCmd {
 				if arg == "-vf" {
 					baseCmd[i+1] += ",yadif"
-					modArg=true
-				} 
+					modArg = true
+				}
 			}
 			if !modArg {
 				addArgs("-vf", "yadif")
@@ -688,8 +688,10 @@ func getWatchLogIfExists(ctx context.Context, wlDir, fileName string) (*watchlog
 
 func watchLogChapters(wl *watchlog.WatchLog) []Chapter {
 	_, consec := watchlog.DetectSkips(wl.Tape)
+	consec = watchlog.FilterConsec(consec)
 	var chapters []Chapter
-	for _, r := range consec {
+	for i, r := range consec {
+		logrus.Infof("range %d from %s to %s", (i + 1), timestampMKV(r.Begin), timestampMKV(r.End))
 		chapters = append(chapters, Chapter{
 			Begin: r.Begin,
 			End:   r.End,

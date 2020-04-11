@@ -28,9 +28,9 @@ type Rule struct {
 }
 
 type GeneralConfig struct {
-	ScratchDir string `toml:"scratch-dir"`
+	ScratchDir  string `toml:"scratch-dir"`
 	WatchLogDir string `toml:"watch-log-dir"`
-	RoundCuts bool `toml:"round-cuts"`
+	RoundCuts   bool   `toml:"round-cuts"`
 }
 
 type EncodeConfig struct {
