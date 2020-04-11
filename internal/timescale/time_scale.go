@@ -36,6 +36,10 @@ func (o Offset) Float() float64 {
 	return float64(o)
 }
 
+func (o Offset) String() string {
+	return TimestampMKV(o)
+}
+
 func FromMillis(millis int64)Offset {
 	return Offset(millis)/1000.0
 }

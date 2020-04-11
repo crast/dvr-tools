@@ -691,10 +691,10 @@ func watchLogChapters(wl *watchlog.WatchLog) []Chapter {
 	consec = watchlog.FilterConsec(consec)
 	var chapters []Chapter
 	for i, r := range consec {
-		logrus.Infof("range %d from %s to %s", (i + 1), timestampMKV(r.Begin), timestampMKV(r.End))
+		logrus.Infof("range %d from %s to %s", (i + 1), r.Begin.String(), r.End.String())
 		chapters = append(chapters, Chapter{
-			Begin: r.Begin,
-			End:   r.End,
+			Begin: float64(r.Begin),
+			End:   float64(r.End),
 		})
 	}
 	return chapters
