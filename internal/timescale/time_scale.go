@@ -3,6 +3,7 @@ package timescale
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -40,8 +41,8 @@ func (o Offset) String() string {
 	return TimestampMKV(o)
 }
 
-func FromMillis(millis int64)Offset {
-	return Offset(millis)/1000.0
+func FromMillis(millis int64) Offset {
+	return Offset(millis) / 1000.0
 }
 
 func TimestampMKV(floatSeconds Offset) string {
@@ -49,7 +50,7 @@ func TimestampMKV(floatSeconds Offset) string {
 	rawMinutes := rawSeconds / 60
 	hours := rawMinutes / 60
 
-	return fmt.Sprintf("%02d:%02d:%2.3f", hours, rawMinutes%60, floatSeconds - Offset(rawSeconds))
+	return fmt.Sprintf("%02d:%02d:%02d.%03d", hours, rawMinutes%60, rawSeconds%60, int(math.Round(float64(floatSeconds)*1000))%1000)
 }
 
 func ParseMKV(s string) (Offset, error) {
