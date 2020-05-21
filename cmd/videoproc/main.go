@@ -30,13 +30,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const FLAG_VER = "3"
+const FLAG_VER = "4"
 
 var configFile string
 var debugMode bool
 var scratchDir string
 var deleteOriginal bool
 var useExistingChapters bool
+var slapChop bool
 
 func main() {
 	defaultConfigFile := "tmp/test.toml"
@@ -52,6 +53,7 @@ func main() {
 	flag.BoolVar(&deleteOriginal, "delete-orig", false, "Delete original file")
 	flag.BoolVar(&useExistingChapters, "existing-chapters", false, "Use existing chapters if possible")
 	flag.StringVar(&lockFile, "lock-file", "", "Lock on this file")
+	flag.BoolVar(&slapChop, "chop-files", false, "Chop files")
 	flag.Parse()
 	if debugMode {
 		logrus.SetLevel(logrus.DebugLevel)
@@ -190,6 +192,7 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 	hasMKVChapters := isMKV && hasChapters
 
 	var ffmpegOpts []string
+	var trackSplitFile string
 
 	if decision.Comskip == "chapter" || decision.Comskip == "comchap" || isTrue(decision.Comskip) {
 		var chapters []Chapter
@@ -257,6 +260,19 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 					}
 					ffmpegOpts = append(ffmpegOpts, "-i", metaFile, "-map_metadata", "1")
 				}
+			} else if slapChop {
+				tmpMKV := fileName
+				if hasMKVChapters {
+					tmpMKV, err = temporaryChapterless(ctx, job, fileName)
+					if err != nil {
+						return err
+					}
+				}
+
+				trackSplitFile, err = performTrackSplit(ctx, job, tmpMKV, nonCommercialChapters(chapters))
+				if err != nil {
+					return err
+				}
 			} else {
 				extraArgs, _ := ffmpegExtractFilters(ctx, job, fileName, nonCommercialChapters(chapters))
 				logrus.Warn("Extra Filters %+v", extraArgs)
@@ -266,7 +282,7 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 		}
 	}
 
-	if len(decision.Actions) == 0 && len(ffmpegOpts) == 0 {
+	if len(decision.Actions) == 0 && len(ffmpegOpts) == 0 && !slapChop && decision.Encode.Video.Codec == "" {
 		logrus.Debug("No actions determined, exiting")
 		return nil
 	}
@@ -280,23 +296,23 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 		}
 	}
 
-	inputFileName := fileName
-	if hasMKVChapters {
-		logrus.Info("Has MKV chapters, we have to clone the input sadly.")
-		tmpMKV := filepath.Join(scratchDir, filepath.Base(stripExtension(fileName))+".nochap.mkv")
-		job.TrackFile(tmpMKV, true)
-		if err := fileio.Copy(ctx, fileName, tmpMKV); err != nil {
-			return errors.Wrap(err, "could not copy file")
-		}
-		if err := runCommand(ctx, "mkvpropedit", tmpMKV, "--chapters", ""); err != nil {
-			return errors.Wrap(err, "could not elide chapters")
-		}
-		inputFileName = tmpMKV
-	}
+	baseCmd := []string{"-nostdin"}
 
-	baseCmd := append([]string{
-		"-nostdin", "-i", inputFileName,
-	}, ffmpegOpts...)
+	if slapChop {
+		baseCmd = append(baseCmd, "-f", "concat", "-safe", "0", "-i", trackSplitFile)
+	} else {
+		inputFileName := fileName
+		if hasMKVChapters {
+			tmpMKV, err := temporaryChapterless(ctx, job, fileName)
+			if err != nil {
+				return err
+			}
+			inputFileName = tmpMKV
+		}
+		baseCmd = append(baseCmd, "-i", inputFileName)
+	}
+	baseCmd = append(baseCmd, ffmpegOpts...)
+
 	baseCmd = append(baseCmd, "-metadata", "videoproc="+FLAG_VER)
 
 	destFile := stripExtension(fileName) + ".mkv"
@@ -313,24 +329,30 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 				addArgs(flag, input)
 			}
 		}
+		modFilter := func(filter string) {
+			modArg := false
+			for i, arg := range baseCmd {
+				if arg == "-vf" {
+					baseCmd[i+1] += "," + filter
+					modArg = true
+				}
+			}
+			if !modArg {
+				addArgs("-vf", filter)
+			}
+		}
 		de := decision.Encode
 		addArgs("-c:v", de.Video.Codec)
 		addSimpleArg(de.Video.Preset, "-preset")
 		addSimpleArg(de.Video.CRF, "-crf")
 		addSimpleArg(de.Video.Level, "-level")
+		if de.Video.Crop != "" {
+			modFilter("crop=" + de.Video.Crop)
+		}
 		addArgs("-c:a", de.Audio.Codec)
 		addSimpleArg(de.Audio.Bitrate, "-b:a")
 		if de.Deinterlace {
-			modArg := false
-			for i, arg := range baseCmd {
-				if arg == "-vf" {
-					baseCmd[i+1] += ",yadif"
-					modArg = true
-				}
-			}
-			if !modArg {
-				addArgs("-vf", "yadif")
-			}
+			modFilter("yadif")
 		}
 		addArgs(tmpOutFile)
 	}
@@ -358,6 +380,46 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 	return nil
 }
 
+func temporaryChapterless(ctx context.Context, job *Job, fileName string) (string, error) {
+	logrus.Info("Has MKV chapters, we have to clone the input sadly.")
+	tmpMKV := filepath.Join(scratchDir, filepath.Base(stripExtension(fileName))+".nochap.mkv")
+	job.TrackFile(tmpMKV, true)
+	if err := fileio.Copy(ctx, fileName, tmpMKV); err != nil {
+		return "", errors.Wrap(err, "could not copy file")
+	}
+	if err := runCommand(ctx, "mkvpropedit", tmpMKV, "--chapters", ""); err != nil {
+		return "", errors.Wrap(err, "could not elide chapters")
+	}
+	return tmpMKV, nil
+}
+
+func performTrackSplit(ctx context.Context, job *Job, fileName string, chapters []Chapter) (string, error) {
+	params := []string{"-nostdin", "-i", fileName}
+	var buf bytes.Buffer
+	for i, c := range chapters {
+		partFile := filepath.Join(job.ScratchDir(), fmt.Sprintf("p%d_tmp%d.ts", os.Getpid(), i))
+		job.TrackFile(partFile, false)
+		params = append(params,
+			"-ss", strconv.FormatFloat(float64(c.Begin), 'f', -1, 64),
+			"-to", strconv.FormatFloat(float64(c.End), 'f', -1, 64),
+			"-c", "copy",
+			partFile,
+		)
+		fmt.Fprintf(&buf, "file '%s'\n", partFile)
+	}
+	logrus.Info("About to track split %+v", params)
+
+	if err := runCommand(ctx, "ffmpeg", params...); err != nil {
+		return "", err
+	}
+	textFile := job.PidPrefix() + "fpart.txt"
+	ioutil.WriteFile(textFile, buf.Bytes(), 0666)
+	job.TrackFile(textFile, true)
+
+	return textFile, nil
+
+}
+
 func nonCommercialChapters(chapters []Chapter) []Chapter {
 	var output []Chapter
 	for _, c := range chapters {
@@ -373,6 +435,7 @@ func copyEncodeRule(dst *videoproc.EncodeConfig, src videoproc.EncodeConfig) {
 	takeString(&dst.Video.Preset, src.Video.Preset)
 	takeString(&dst.Video.CRF, src.Video.CRF)
 	takeString(&dst.Video.Level, src.Video.Level)
+	takeString(&dst.Video.Crop, src.Video.Crop)
 	takeString(&dst.Audio.Codec, src.Audio.Codec)
 	takeString(&dst.Audio.Bitrate, src.Audio.Bitrate)
 	if src.Deinterlace {
@@ -388,6 +451,14 @@ type TrackedFile struct {
 type Job struct {
 	Config       *videoproc.Config
 	filesTracked []TrackedFile
+}
+
+func (job *Job) ScratchDir() string {
+	return job.Config.General.ScratchDir
+}
+
+func (job *Job) PidPrefix() string {
+	return filepath.Join(job.ScratchDir(), fmt.Sprintf("p%d", os.Getpid()))
 }
 
 func (job *Job) TrackFile(fileName string, missingOK bool) {
@@ -500,6 +571,7 @@ func runComskip(ctx context.Context, job *Job, fileName string, decision *videop
 	logrus.Debug(cmd.Args)
 	absoluteBase := filepath.Join(scratchDir, csPrefix)
 	job.TrackFile(absoluteBase+".ccyes", true)
+	job.TrackFile(absoluteBase+".ccno", true)
 	job.TrackFile(absoluteBase+".edl", true)
 	job.TrackFile(absoluteBase+".txt", true)
 	job.TrackFile(absoluteBase+".log", true)

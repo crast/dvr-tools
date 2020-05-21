@@ -44,6 +44,7 @@ type EncodeVideo struct {
 	Preset string
 	CRF    string
 	Level  string
+	Crop   string
 }
 
 type EncodeAudio struct {
