@@ -3,8 +3,10 @@ package watchlog
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/crast/videoproc/internal/jsonio"
 	"github.com/crast/videoproc/internal/timescale"
@@ -15,7 +17,7 @@ type WatchLog struct {
 	Note     string `json:",omitempty"`
 	Consec   []Region
 	Skips    []Region
-	Tape     []timescale.Offset
+	Tape     []OffsetInfo
 }
 
 type Region struct {
@@ -47,4 +49,41 @@ func GenName(watchdir string, fileName string) (string, error) {
 	hash := md5.Sum([]byte(filepath.Dir(fileName)))
 	prefix := hex.EncodeToString(hash[:10])
 	return filepath.Join(watchdir, fmt.Sprintf("%s_%s.json", prefix, filepath.Base(fileName))), nil
+}
+
+type OffsetInfo struct {
+	timescale.Offset
+	Info string
+}
+
+func (o OffsetInfo) MarshalJSON() ([]byte, error) {
+	if o.Info == "" {
+		return o.Offset.MarshalJSON()
+	}
+	return json.Marshal(timescale.TimestampMKV(o.Offset) + "//" + o.Info)
+}
+
+func (o *OffsetInfo) UnmarshalJSON(data []byte) error {
+	if data[0] == '"' {
+		var dest string
+		err := json.Unmarshal(data, &dest)
+		if err != nil {
+			return err
+		}
+		parts := strings.SplitN(dest, "//", 2)
+		if len(parts) == 2 {
+			o.Info = parts[1]
+		}
+		o.Offset, err = timescale.ParseMKV(parts[0])
+		return err
+	}
+	return o.Offset.UnmarshalJSON(data)
+}
+
+func BasicTape(input []OffsetInfo) []timescale.Offset {
+	output := make([]timescale.Offset, len(input))
+	for i := 0; i < len(input); i++ {
+		output[i] = input[i].Offset
+	}
+	return output
 }

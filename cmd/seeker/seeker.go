@@ -246,7 +246,7 @@ func (s *State) Watcher(ctx context.Context) {
 
 	for i, p := range positions {
 		fp := timescale.FromMillis(p.Position)
-		wl.Tape = append(wl.Tape, fp)
+		wl.Tape = append(wl.Tape, watchlog.OffsetInfo{Offset: fp, Info: p.Info})
 		logrus.Debugf(" -> %02d: %.1f", i, fp)
 	}
 
@@ -254,14 +254,14 @@ func (s *State) Watcher(ctx context.Context) {
 
 	if len(wl.Tape) < 5 {
 		return
-	} else if (durationSec - wl.Tape[len(wl.Tape)-1]) > 150.0 {
+	} else if (durationSec - wl.Tape[len(wl.Tape)-1].Offset) > 150.0 {
 		logrus.Warnf("Didn't watch full duration, marking")
 		wl.Note = "partial"
 		// logrus.Debugf("Discarded playtape: %#v", playtape)
 		// return
 	}
 
-	wl.Skips, wl.Consec = watchlog.DetectSkips(wl.Tape)
+	wl.Skips, wl.Consec = watchlog.DetectSkips(watchlog.BasicTape(wl.Tape))
 
 	if len(wl.Skips) == 0 {
 		wl.Note = "noskip"
@@ -340,7 +340,7 @@ func (s *State) watcherMain(ctx context.Context) ([]position, error) {
 		}
 
 		if !samePos {
-			positions = append(positions, position{offset, update.Time})
+			positions = append(positions, position{offset, update.Time, update.Source})
 		}
 	}
 	logrus.Warn("end of seeker loop")
@@ -359,6 +359,7 @@ func timestampMKV(floatSeconds float64) string {
 type position struct {
 	Position int64
 	Time     time.Time
+	Info     string
 }
 
 type PlayUpdate struct {

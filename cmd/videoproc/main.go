@@ -759,7 +759,7 @@ func getWatchLogIfExists(ctx context.Context, wlDir, fileName string) (*watchlog
 }
 
 func watchLogChapters(wl *watchlog.WatchLog) []Chapter {
-	_, consec := watchlog.DetectSkips(wl.Tape)
+	_, consec := watchlog.DetectSkips(watchlog.BasicTape(wl.Tape))
 	consec = watchlog.FilterConsec(consec)
 	var chapters []Chapter
 	for i, r := range consec {

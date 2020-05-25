@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/pkg/errors"
@@ -56,7 +57,12 @@ func Move(ctx context.Context, sourceFile, destFile string) error {
 	fsnumSrc, ok1 := fsnum(fi)
 	fsnumDest, ok2 := fsnum(destDirInfo)
 	if ok1 && ok2 && fsnumSrc == fsnumDest {
-		return os.Rename(sourceFileAbs, destFileAbs)
+		err = os.Rename(sourceFileAbs, destFileAbs)
+		if err == nil {
+			return err
+		} else if !strings.Contains(err.Error(), "cross-device") {
+			return err
+		}
 	}
 
 	addOnFile := destFileAbs + ".tmp." + strconv.FormatInt(rand.Int63(), 16)
