@@ -23,6 +23,8 @@ type Rule struct {
 	ComskipINI string `toml:"comskip-ini"`
 	Actions    []string
 
+	MatchShows []string `toml:"match-shows"`
+
 	Profile string
 	Encode  EncodeConfig
 }

@@ -24,13 +24,12 @@ import (
 	"github.com/crast/videoproc/mediainfo"
 	"github.com/crast/videoproc/watchlog"
 
-	"github.com/antonmedv/expr"
 	"github.com/nightlyone/lockfile"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
-const FLAG_VER = "4"
+const FLAG_VER = "5"
 
 var configFile string
 var debugMode bool
@@ -38,6 +37,7 @@ var scratchDir string
 var deleteOriginal bool
 var useExistingChapters bool
 var slapChop bool
+var preferWatchlog bool
 
 func main() {
 	defaultConfigFile := "tmp/test.toml"
@@ -53,6 +53,7 @@ func main() {
 	flag.BoolVar(&deleteOriginal, "delete-orig", false, "Delete original file")
 	flag.BoolVar(&useExistingChapters, "existing-chapters", false, "Use existing chapters if possible")
 	flag.StringVar(&lockFile, "lock-file", "", "Lock on this file")
+	flag.BoolVar(&preferWatchlog, "prefer-watchlog", false, "Prefer watchlog")
 	flag.BoolVar(&slapChop, "chop-files", false, "Chop files")
 	flag.Parse()
 	if debugMode {
@@ -91,13 +92,25 @@ func main() {
 			logrus.Fatal(err)
 			return
 		}
+		duration := 1 * time.Second
+		begin := time.Now()
 		for {
 			if err := l.TryLock(); err == nil {
 				defer l.Unlock()
 				break
 			}
-			logrus.Debug("Lockfile was held, sleeping 1 sec")
-			time.Sleep(1 * time.Second)
+
+			if time.Since(begin) > 1*time.Hour {
+				logrus.Warnf("p%d giving up, waited over 1 hr", os.Getpid())
+				os.Exit(1)
+			}
+
+			logrus.Debugf("p%d Lockfile was held, sleeping %s", os.Getpid(), duration.String())
+			time.Sleep(duration)
+
+			if duration < 30*time.Second {
+				duration += 100 * time.Millisecond
+			}
 		}
 	}
 
@@ -116,8 +129,10 @@ func main() {
 
 func processVideo(ctx context.Context, job *Job, fileName string) error {
 	scratchDir = job.Config.General.ScratchDir
-	evaluators := videoproc.MakeEvaluators(job.Config.Rule)
-
+	evaluators, err := videoproc.MakeEvaluators(job.Config.Rule)
+	if err != nil {
+		return errors.Wrap(err, "could not build evaluator")
+	}
 	info, err := mediainfo.Parse(context.Background(), fileName)
 	if err != nil {
 		return errors.Wrap(err, "could not parse mediainfo")
@@ -161,11 +176,11 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 	decision := &videoproc.Rule{}
 
 	for i, rule := range job.Config.Rule {
-		output, err := expr.Run(evaluators[i], c)
+		output, err := evaluators[i](c)
 		if err != nil {
 			logrus.Fatal(err)
 		}
-		if !output.(bool) {
+		if !output {
 			continue
 		}
 		logrus.Infof("MATCHED RULE %v", rule.Label)
@@ -208,14 +223,14 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 				} else if wl != nil {
 					logrus.Info("got watchlog")
 					wlchapters = watchLogChapters(wl)
-					if wl.Note == "prefer" {
+					if wl.Note == "prefer" || preferWatchlog {
 						logrus.Info("Preferring watchlog chapters")
 						chapters = wlchapters
 					}
 				}
 			}
 
-			if wl == nil || wl.Note != "prefer" {
+			if !preferWatchlog && (wl == nil || wl.Note != "prefer") {
 				chapters, err = extractExistingChapters(ctx, job, fileName)
 				if err != nil {
 					return err
@@ -555,6 +570,8 @@ func chaptersToFF(chapters []Chapter) []byte {
 func runComskip(ctx context.Context, job *Job, fileName string, decision *videoproc.Rule) ([]Commercial, error) {
 	logrus.Infof("About to run comskip")
 	csPrefix := "vp" + strconv.Itoa(os.Getpid())
+	ctx, cancel := context.WithTimeout(ctx, 1*time.Hour)
+	defer cancel()
 	cmd := exec.CommandContext(
 		ctx,
 		"comskip",
