@@ -13,11 +13,27 @@ import (
 )
 
 type WatchLog struct {
-	Filename string `json:"filename,omitempty"`
-	Note     string `json:",omitempty"`
-	Consec   []Region
-	Skips    []Region
-	Tape     []OffsetInfo
+	Filename string           `json:"filename,omitempty"`
+	Note     string           `json:",omitempty"`
+	Special  *WatchLogSpecial `json:"special,omitempty"`
+	KnownDuration timescale.Offset `json:"known-duration,omitempty"`
+
+	Consec []Region
+	Skips  []Region
+	Tape   []OffsetInfo
+}
+
+func (wl *WatchLog) EnsureSpecial() *WatchLogSpecial {
+	sp := wl.Special
+	if sp == nil {
+		sp = &WatchLogSpecial{}
+		wl.Special = sp
+	}
+	return sp
+}
+
+type WatchLogSpecial struct {
+	OverrideStart timescale.Offset `json:"override-start,omitempty"`
 }
 
 type Region struct {

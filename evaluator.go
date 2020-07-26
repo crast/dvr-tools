@@ -80,4 +80,7 @@ type VideoCtx struct {
 type AudioCtx struct {
 	Format string
 	Extra  map[string]string
+	BitRate int
+	Channels int
+	SamplingRate int
 }

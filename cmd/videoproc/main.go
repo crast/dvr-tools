@@ -29,7 +29,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const FLAG_VER = "5"
+const FLAG_VER = "7"
 
 var configFile string
 var debugMode bool
@@ -38,6 +38,9 @@ var deleteOriginal bool
 var useExistingChapters bool
 var slapChop bool
 var preferWatchlog bool
+var fuzzBegin float64
+var fuzzEnd float64
+var manualChop string
 
 func main() {
 	defaultConfigFile := "tmp/test.toml"
@@ -55,6 +58,9 @@ func main() {
 	flag.StringVar(&lockFile, "lock-file", "", "Lock on this file")
 	flag.BoolVar(&preferWatchlog, "prefer-watchlog", false, "Prefer watchlog")
 	flag.BoolVar(&slapChop, "chop-files", false, "Chop files")
+	flag.Float64Var(&fuzzBegin, "fuzz-begin", 0.000, "Chapter fuzz")
+	flag.Float64Var(&fuzzEnd, "fuzz-end", 0.000, "Chapter fuzz")
+	flag.StringVar(&manualChop, "manual-chop", "", "Force Chop string e.g. '0:45 0:78'")
 	flag.Parse()
 	if debugMode {
 		logrus.SetLevel(logrus.DebugLevel)
@@ -62,12 +68,14 @@ func main() {
 		logrus.SetLevel(logrus.InfoLevel)
 	}
 
-	logrus.Debugf("videoproc FLAG %s", FLAG_VER)
-
 	if flag.NArg() != 1 {
 		fmt.Println("usage: Blah De Blah <media file>")
 		flag.Usage()
 		os.Exit(1)
+	}
+
+	if manualChop != "" && slapChop {
+		logrus.Fatal("Cannot use manual chop and chop-files at the same time")
 	}
 
 	conf, err := videoproc.ParseConfig(configFile)
@@ -166,6 +174,9 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 		case *mediainfo.AudioTrack:
 			c.Audio.Format = v.Format
 			c.Audio.Extra = v.Extra
+			c.Audio.BitRate = v.BitRate.Int()
+			c.Audio.Channels = v.Channels.Int()
+			c.Audio.SamplingRate = v.SamplingRate.Int()
 		case *mediainfo.MenuTrack:
 			hasChapters = true
 		}
@@ -288,6 +299,9 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 				if err != nil {
 					return err
 				}
+				if tmpMKV != fileName {
+					os.Remove(tmpMKV)
+				}
 			} else {
 				extraArgs, _ := ffmpegExtractFilters(ctx, job, fileName, nonCommercialChapters(chapters))
 				logrus.Warn("Extra Filters %+v", extraArgs)
@@ -302,10 +316,14 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 		return nil
 	}
 
+	ivtc := false
+
 	for _, action := range decision.Actions {
 		switch action {
 		case "force-anamorphic":
 			ffmpegOpts = append(ffmpegOpts, "-aspect", "16:9")
+		case "inverse-telecine":
+			ivtc = true
 		default:
 			logrus.Fatalf("unrecognized action %s", action)
 		}
@@ -333,6 +351,18 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 	destFile := stripExtension(fileName) + ".mkv"
 
 	tmpOutFile := filepath.Join(scratchDir, filepath.Base(destFile))
+
+	if manualChop != "" {
+		parts := strings.Split(manualChop, " ")
+		if len(parts) > 2 {
+			return errors.New("manual chop must be 1 or 2 parts only")
+		}
+		baseCmd = append(baseCmd, "-ss", strings.TrimSpace(parts[0]))
+		if len(parts) == 2 {
+			baseCmd = append(baseCmd, "-to", strings.TrimSpace(parts[1]))
+		}
+	}
+
 	if decision.Encode.Video.Codec == "" && decision.Encode.Audio.Codec == "" {
 		baseCmd = append(baseCmd, "-c", "copy", tmpOutFile)
 	} else {
@@ -356,6 +386,7 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 				addArgs("-vf", filter)
 			}
 		}
+
 		de := decision.Encode
 		addArgs("-c:v", de.Video.Codec)
 		addSimpleArg(de.Video.Preset, "-preset")
@@ -368,6 +399,9 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 		addSimpleArg(de.Audio.Bitrate, "-b:a")
 		if de.Deinterlace {
 			modFilter("yadif")
+		}
+		if ivtc {
+			modFilter("decimate")
 		}
 		addArgs(tmpOutFile)
 	}
@@ -415,8 +449,8 @@ func performTrackSplit(ctx context.Context, job *Job, fileName string, chapters 
 		partFile := filepath.Join(job.ScratchDir(), fmt.Sprintf("p%d_tmp%d.ts", os.Getpid(), i))
 		job.TrackFile(partFile, false)
 		params = append(params,
-			"-ss", strconv.FormatFloat(float64(c.Begin), 'f', -1, 64),
-			"-to", strconv.FormatFloat(float64(c.End), 'f', -1, 64),
+			"-ss", strconv.FormatFloat(float64(c.Begin-fuzzBegin), 'f', -1, 64),
+			"-to", strconv.FormatFloat(float64(c.End+fuzzEnd), 'f', -1, 64),
 			"-c", "copy",
 			partFile,
 		)

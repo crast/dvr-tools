@@ -29,6 +29,14 @@
   version = "v1.8.2"
 
 [[projects]]
+  digest = "1:25ebe6496abb289ef977c081b2d49f56dd97c32db4ca083d37f95923909ced02"
+  name = "github.com/gorilla/mux"
+  packages = ["."]
+  pruneopts = "UT"
+  revision = "75dcda0896e109a2a22c9315bca3bb21b87b2ba5"
+  version = "v1.7.4"
+
+[[projects]]
   digest = "1:31e761d97c76151dde79e9d28964a812c46efc5baee4085b86f68f0c654450de"
   name = "github.com/konsorten/go-windows-terminal-sequences"
   packages = ["."]
@@ -87,6 +95,7 @@
     "github.com/BurntSushi/toml",
     "github.com/antonmedv/expr",
     "github.com/antonmedv/expr/vm",
+    "github.com/gorilla/mux",
     "github.com/nightlyone/lockfile",
     "github.com/pkg/errors",
     "github.com/sirupsen/logrus",

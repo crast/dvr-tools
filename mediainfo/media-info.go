@@ -70,6 +70,9 @@ type VideoTrack struct {
 
 type AudioTrack struct {
 	MediaTrackMixin
+	BitRate QuotedInt `json:"BitRate"`
+	Channels QuotedInt `json:"Channels"`
+	SamplingRate QuotedInt `json:"SamplingRate"`
 }
 
 type MenuTrack struct {
