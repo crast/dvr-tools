@@ -13,10 +13,12 @@ import (
 )
 
 type WatchLog struct {
-	Filename string           `json:"filename,omitempty"`
-	Note     string           `json:",omitempty"`
-	Special  *WatchLogSpecial `json:"special,omitempty"`
-	KnownDuration timescale.Offset `json:"known-duration,omitempty"`
+	Filename      string           `json:"filename,omitempty"`
+	Note          string           `json:"note,omitempty"`
+	Special       *WatchLogSpecial `json:"special,omitempty"`
+	KnownDuration timescale.Offset `json:"knownDuration,omitempty"`
+	KnownSize     int64            `json:"knownSize,omitempty"`
+	KnownModTime  string           `json:"knownModTime,omitempty"`
 
 	Consec []Region
 	Skips  []Region
@@ -34,17 +36,35 @@ func (wl *WatchLog) EnsureSpecial() *WatchLogSpecial {
 
 type WatchLogSpecial struct {
 	OverrideStart timescale.Offset `json:"override-start,omitempty"`
+	Autoprocess   bool             `json:"autoprocess,omitempty"`
 }
 
 type Region struct {
 	Begin timescale.Offset
 	End   timescale.Offset
+
+	PointCount int `json:"point-count,omitempty"`
+}
+
+func (r Region) DisplayString() string {
+	return fmt.Sprintf("[%s=>%s]", r.Begin.String(), r.End.String())
 }
 
 // FilterConsec filters junk from the consec list
 func FilterConsec(regions []Region) []Region {
+	hasPointCount := false
+	for i := range regions {
+		if regions[i].PointCount > 0 {
+			hasPointCount = true
+			break
+		}
+	}
 	var output []Region
 	for _, region := range regions {
+		if hasPointCount && region.PointCount < 5 {
+			continue
+		}
+
 		if (region.End - region.Begin) > 15.0 {
 			output = append(output, region)
 		}

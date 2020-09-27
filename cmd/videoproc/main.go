@@ -32,15 +32,19 @@ import (
 const FLAG_VER = "7"
 
 var configFile string
-var debugMode bool
 var scratchDir string
 var deleteOriginal bool
 var useExistingChapters bool
 var slapChop bool
-var preferWatchlog bool
 var fuzzBegin float64
 var fuzzEnd float64
 var manualChop string
+
+var (
+	debugMode      bool
+	preferWatchlog bool
+	promptWatchlog bool
+)
 
 func main() {
 	defaultConfigFile := "tmp/test.toml"
@@ -56,6 +60,7 @@ func main() {
 	flag.BoolVar(&deleteOriginal, "delete-orig", false, "Delete original file")
 	flag.BoolVar(&useExistingChapters, "existing-chapters", false, "Use existing chapters if possible")
 	flag.StringVar(&lockFile, "lock-file", "", "Lock on this file")
+	flag.BoolVar(&promptWatchlog, "prompt-wl", false, "Prompt for watchlog decision")
 	flag.BoolVar(&preferWatchlog, "prefer-watchlog", false, "Prefer watchlog")
 	flag.BoolVar(&slapChop, "chop-files", false, "Chop files")
 	flag.Float64Var(&fuzzBegin, "fuzz-begin", 0.000, "Chapter fuzz")
@@ -252,10 +257,16 @@ func processVideo(ctx context.Context, job *Job, fileName string) error {
 
 			}
 
-			if len(chapters) == 0 && len(wlchapters) != 0 {
-				chapters = wlchapters
+			if len(wlchapters) != 0 {
+				if promptWatchlog {
+					chapters, err = promptWLDecision(ctx, job, wlchapters, chapters)
+					if err != nil {
+						return err
+					}
+				} else if len(chapters) == 0 {
+					chapters = wlchapters
+				}
 			}
-
 		} else {
 			commercials, err := runComskip(ctx, job, fileName, decision)
 			if err != nil {
@@ -467,6 +478,10 @@ func performTrackSplit(ctx context.Context, job *Job, fileName string, chapters 
 
 	return textFile, nil
 
+}
+
+func promptWLDecision(ctx context.Context, job *Job, wlchapters, chapters []Chapter) ([]Chapter, error) {
+	return chapters, nil
 }
 
 func nonCommercialChapters(chapters []Chapter) []Chapter {

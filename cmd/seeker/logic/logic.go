@@ -3,7 +3,9 @@ package logic
 import (
 	"context"
 	"encoding/xml"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,8 @@ import (
 var Token string
 var PlexServer string
 var WatchLogDir string
+
+var thresholdTime = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 func GlobalPoller(ctx context.Context) {
 	const smallTimeout = 2500 * time.Millisecond
@@ -107,6 +111,7 @@ type State struct {
 
 type currentState struct {
 	Prefer        bool
+	Autoprocess   bool
 	StartOverride timescale.Offset
 	CurrentPos    timescale.Offset
 }
@@ -173,11 +178,15 @@ func (s *State) Watcher(ctx context.Context) {
 		}
 	} else {
 		logrus.Infof("restored playtape with %d points", len(wl.Tape))
-		if wl.Note == "prefer" {
-			s.WithLock(func() {
+		s.WithLock(func() {
+			if wl.Note == "prefer" {
 				s.cs.Prefer = true
-			})
-		} else if wl.Note == "partial" {
+			}
+			if sp := wl.Special; sp != nil {
+				s.cs.StartOverride = sp.OverrideStart
+			}
+		})
+		if wl.Note == "partial" {
 			wl.Note = ""
 		}
 	}
@@ -185,6 +194,14 @@ func (s *State) Watcher(ctx context.Context) {
 	wl.Filename = fileName
 	durationSec := timescale.FromMillis(video.Duration)
 	wl.KnownDuration = durationSec
+
+	st, err := os.Stat(fileName)
+	if err == nil {
+		wl.KnownSize = st.Size()
+		if t := st.ModTime(); t.After(thresholdTime) {
+			wl.KnownModTime = st.ModTime().UTC().Format(time.RFC3339)
+		}
+	}
 
 	positions, err := s.watcherMain(ctx)
 	if err != nil {
@@ -194,6 +211,7 @@ func (s *State) Watcher(ctx context.Context) {
 
 	cs := s.Snapshot()
 	special := wl.EnsureSpecial()
+	special.Autoprocess = cs.Autoprocess
 
 	if cs.StartOverride > 0.0 {
 		special.OverrideStart = cs.StartOverride
@@ -218,8 +236,15 @@ func (s *State) Watcher(ctx context.Context) {
 	if len(wl.Tape) < 5 {
 		return
 	}
+
+	isPartial := false
+	fullThreshold := timescale.Offset(150.0)
+	if durationSec > 3550 {
+		fullThreshold = 240.0
+	}
 	fromFullDuration := (durationSec - wl.Tape[len(wl.Tape)-1].Offset)
-	if fromFullDuration > 150.0 {
+	if fromFullDuration > fullThreshold {
+		isPartial = true
 		logrus.Warnf("Didn't watch full duration, marking")
 		wl.Note = "partial"
 		// logrus.Debugf("Discarded playtape: %#v", playtape)
@@ -254,6 +279,19 @@ func (s *State) Watcher(ctx context.Context) {
 	err = jsonio.WriteFile(jsonFileName, wl)
 	if err != nil {
 		logrus.Warnf("Could not make watchlog %s: %s", jsonFileName, err.Error())
+	}
+	if cs.Autoprocess && !isPartial {
+		apFileName := filepath.Join(WatchLogDir, "autoprocess.txt")
+		f, err := os.OpenFile(apFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+		if err != nil {
+			logrus.Warn(err)
+			return
+		}
+		fmt.Fprintf(f, "%s\n", jsonFileName)
+		if err = f.Close(); err != nil {
+			logrus.Warn(err)
+			return
+		}
 	}
 }
 
