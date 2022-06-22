@@ -13,9 +13,9 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"github.com/crast/videoproc/internal/jsonio"
-	"github.com/crast/videoproc/internal/timescale"
-	"github.com/crast/videoproc/watchlog"
+	"github.com/crast/dvr-tools/internal/jsonio"
+	"github.com/crast/dvr-tools/internal/timescale"
+	"github.com/crast/dvr-tools/watchlog"
 )
 
 var Token string

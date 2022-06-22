@@ -19,10 +19,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/crast/videoproc"
-	"github.com/crast/videoproc/internal/fileio"
-	"github.com/crast/videoproc/mediainfo"
-	"github.com/crast/videoproc/watchlog"
+	"github.com/crast/dvr-tools"
+	"github.com/crast/dvr-tools/internal/fileio"
+	"github.com/crast/dvr-tools/mediainfo"
+	"github.com/crast/dvr-tools/watchlog"
 
 	"github.com/nightlyone/lockfile"
 	"github.com/pkg/errors"

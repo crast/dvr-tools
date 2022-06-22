@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/crast/videoproc/internal/timescale"
+	"github.com/crast/dvr-tools/internal/timescale"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 )

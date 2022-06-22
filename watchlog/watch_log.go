@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/crast/videoproc/internal/jsonio"
-	"github.com/crast/videoproc/internal/timescale"
+	"github.com/crast/dvr-tools/internal/jsonio"
+	"github.com/crast/dvr-tools/internal/timescale"
 )
 
 type WatchLog struct {

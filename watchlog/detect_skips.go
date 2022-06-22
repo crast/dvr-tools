@@ -1,7 +1,7 @@
 package watchlog
 
 import (
-	"github.com/crast/videoproc/internal/timescale"
+	"github.com/crast/dvr-tools/internal/timescale"
 	"github.com/sirupsen/logrus"
 )
 

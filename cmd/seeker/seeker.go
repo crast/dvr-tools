@@ -10,7 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 	app "gopkg.in/crast/app.v0"
 
-	"github.com/crast/videoproc/cmd/seeker/logic"
+	"github.com/crast/dvr-tools/cmd/seeker/logic"
 )
 
 func main() {
