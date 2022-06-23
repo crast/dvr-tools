@@ -1,0 +1,118 @@
+# This is an example of a re-encode heavy configuration script.
+
+[general]
+scratch-dir = "/scratch/tmp"
+#round-cuts = true
+# watchlogs are used for manual commercial skipping.
+# see upcoming documentation for more
+watch-log-dir = "/config/videoproc/watchlog"
+
+	# Map folders from docker containers and other applications to folders in our context
+	[general.flipdirs]
+	"/dvr/TV" = "/dvr/work/TV"
+	"/dvr/TV-Daily" = "/dvr/work/TV-Daily"
+	"/media/TV" = "/media/work/TV"
+	"/media/TV-Daily" = "/media/work/TV-Daily"
+
+# -- PROFILES
+# Here I have two example profiles.
+# Profiles are a way of specifying an entire block video options in a rule.
+# You can specify them in the shorthand toml format or the long-form one.
+
+[[profile]]
+name="TV-SD"
+video = { codec="libx264", preset="medium", crf="23" } #level="4.1"
+audio = { codec = "aac", bitrate="160k" }
+
+
+[[profile]]
+name="TV-HD"
+	
+	[profile.video]
+	codec="libx264"
+	preset="medium"
+	crf="23"
+
+	[profile.audio]
+	codec="copy"
+
+
+
+# You should nearly always have a default rule that matches all files.
+# Without one, videoproc may not know what to do.
+
+[[rule]]
+label = "Default"
+match = "true"
+profile = "TV-HD"
+comskip = "true"
+
+[[rule]]
+label = "SD"
+match = "Height <= 480"
+profile = "TV-SD"
+
+
+# This rule specifies to re-encode all audio that are not AC-3 multichannel.
+[[rule]]
+label = "AAC encode non-AC3"
+match="Audio.Format != 'AC-3' || Audio.BitRate > 384000"
+
+	[rule.encode.audio]
+	codec="aac"
+	bitrate="256k"
+
+# This fairly useful generic rule says to de-interlace all interlaced files
+[[rule]]
+label = "Deinterlace"
+match = "Video.ScanType == 'Interlaced'"
+	
+	[rule.encode]
+	deinterlace = true
+
+
+[[rule]]
+label = "broken-anamorphic"
+match = "Width == 528 && Height == 480"
+actions = ["force-anamorphic"]
+
+# Here is an example of cropping video which is imperfectly scan converted
+[[rule]]
+label ="Charge 4:3"
+match-shows = ["Knight Rider", "Magnum P.I."]
+
+	[rule.encode.video]
+	crf="23"
+	crop="480:472"
+
+# Some classic TV re-broadcasts include VHS tracking lines.
+# We can crop them out.
+[[rule]]
+label ="Classic TV"
+match-shows = ["Bewitched"]
+
+	[rule.encode.video]
+	crf="23"
+	crop="w=688:x=4:h=472:y=8"
+
+# Save CPU time, don't comskip PBS shows
+[[rule]]
+label = "PBS"
+match-shows = ["NOVA", "American Experience", "PBS NewsHour"]
+comskip = "false"
+
+# Cartoon shows can be inverse telecined to get them back to their 24 fps format.
+[[rule]]
+label = "Cartoons"
+match = "(Name startsWith 'Family Guy' || Name startswith 'The Simpsons') && Height == 720"
+actions = ["inverse-telecine"]
+
+
+[[rule]]
+label = "Family Guy"
+match-shows = ["Family Guy"]
+
+	[rule.encode.video]
+	crf="23"
+	crop="w=960:h=720"
+

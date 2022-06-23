@@ -1,0 +1,56 @@
+# This is a slightly shortened of my main DVR configuration script.
+# I use this as an automatic processing on all recorded files
+
+[general]
+# Scratch dir is a folder used for storing files during remuxing/transcoding.
+# The primary intent is to not do heavy I/O on the DVR storage array (presumed spinning disks)
+# It's recommended to use a SSD or perhaps ramdisk for the scratch dir. 
+scratch-dir = "/scratch/tmp"
+
+
+[[profile]]
+name="Encode-HD"
+	
+	[profile.video]
+	codec="libx264"
+	preset="medium"
+	crf="23"
+
+	[profile.audio]
+	codec="aac"
+	bitrate="256k"
+
+[[rule]]
+label = "Default"
+match = "true"
+comskip = "chapter"
+comskip-ini = "/config/videoproc/comskip-ota-hd.ini"
+
+# Standard definition shows get a different comskip file
+[[rule]]
+label = "SD"
+match = "Height <= 480"
+comskip-ini = "/config/videoproc/comskip-sd.ini"
+
+# For some reason, some US TV stations broadcast anamorphic squashed content.
+# Your set-top box may handle this, but media players don't know about this.
+# The force-anamorphic action will force a 16:9 aspect ratio despite non-square pixels.
+[[rule]]
+label = "broken-anamorphic"
+match = "Width == 528 && Height == 480"
+actions = ["force-anamorphic"]
+
+
+# The 2022 winter olympics had 3+ hour broadcasts of about 20GB each,
+# I opted to encode these on the fly in a lower quality format
+[[rule]]
+label = "Olympics"
+match-shows = ["2022 Winter Olympics"]
+profile = "Encode-HD"
+
+	[rule.encode]
+	deinterlace = true
+
+	[rule.encode.video]
+	codec="libx264"
+	crf="26"
